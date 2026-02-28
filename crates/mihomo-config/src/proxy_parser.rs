@@ -2,9 +2,7 @@ use async_trait::async_trait;
 use mihomo_common::{
     AdapterType, DelayHistory, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
 };
-use mihomo_proxy::{
-    FallbackGroup, SelectorGroup, ShadowsocksAdapter, TrojanAdapter, UrlTestGroup,
-};
+use mihomo_proxy::{FallbackGroup, SelectorGroup, ShadowsocksAdapter, TrojanAdapter, UrlTestGroup};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -89,10 +87,7 @@ pub fn parse_proxy(
                 .get("cipher")
                 .and_then(|v| v.as_str())
                 .ok_or("missing cipher")?;
-            let udp = config
-                .get("udp")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let udp = config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let adapter = ShadowsocksAdapter::new(name, server, port, password, cipher, udp)
                 .map_err(|e| format!("ss: {}", e))?;
@@ -111,21 +106,14 @@ pub fn parse_proxy(
                 .get("password")
                 .and_then(|v| v.as_str())
                 .ok_or("missing password")?;
-            let sni = config
-                .get("sni")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let sni = config.get("sni").and_then(|v| v.as_str()).unwrap_or("");
             let skip_verify = config
                 .get("skip-cert-verify")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let udp = config
-                .get("udp")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let udp = config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let adapter =
-                TrojanAdapter::new(name, server, port, password, sni, skip_verify, udp);
+            let adapter = TrojanAdapter::new(name, server, port, password, sni, skip_verify, udp);
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
         _ => Err(format!("unsupported proxy type: {}", proxy_type)),

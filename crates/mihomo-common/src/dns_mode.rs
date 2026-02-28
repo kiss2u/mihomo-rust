@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DnsMode {
+    #[default]
     Normal,
     FakeIp,
     Mapping,
@@ -16,11 +17,5 @@ impl fmt::Display for DnsMode {
             DnsMode::FakeIp => write!(f, "fake-ip"),
             DnsMode::Mapping => write!(f, "redir-host"),
         }
-    }
-}
-
-impl Default for DnsMode {
-    fn default() -> Self {
-        DnsMode::Normal
     }
 }

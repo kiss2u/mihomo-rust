@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use mihomo_common::{AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result};
+use mihomo_common::{
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+};
 use shadowsocks::config::{ServerConfig, ServerType};
 use shadowsocks::context::Context;
 use shadowsocks::crypto::CipherKind;

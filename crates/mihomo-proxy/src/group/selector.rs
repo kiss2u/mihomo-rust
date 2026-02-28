@@ -55,8 +55,7 @@ impl ProxyAdapter for SelectorGroup {
     }
 
     fn support_udp(&self) -> bool {
-        self.selected_proxy()
-            .is_some_and(|p| p.support_udp())
+        self.selected_proxy().is_some_and(|p| p.support_udp())
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
@@ -84,14 +83,11 @@ impl Proxy for SelectorGroup {
     }
 
     fn alive_for_url(&self, url: &str) -> bool {
-        self.selected_proxy()
-            .is_some_and(|p| p.alive_for_url(url))
+        self.selected_proxy().is_some_and(|p| p.alive_for_url(url))
     }
 
     fn last_delay(&self) -> u16 {
-        self.selected_proxy()
-            .map(|p| p.last_delay())
-            .unwrap_or(0)
+        self.selected_proxy().map(|p| p.last_delay()).unwrap_or(0)
     }
 
     fn last_delay_for_url(&self, url: &str) -> u16 {

@@ -28,9 +28,7 @@ impl PortRule {
                     .map_err(|e| format!("invalid port: {}", e))?;
                 ranges.push(PortRange::Range(start, end));
             } else {
-                let port: u16 = part
-                    .parse()
-                    .map_err(|e| format!("invalid port: {}", e))?;
+                let port: u16 = part.parse().map_err(|e| format!("invalid port: {}", e))?;
                 ranges.push(PortRange::Single(port));
             }
         }

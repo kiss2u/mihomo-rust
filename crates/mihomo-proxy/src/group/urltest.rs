@@ -43,10 +43,7 @@ impl UrlTestGroup {
             .map(|p| p.last_delay())
             .unwrap_or(u16::MAX);
         if best_delay + self.tolerance < current_delay
-            || !self
-                .proxies
-                .get(current)
-                .is_some_and(|p| p.alive())
+            || !self.proxies.get(current).is_some_and(|p| p.alive())
         {
             *self.fastest.write() = best_idx;
         }
@@ -73,8 +70,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     fn support_udp(&self) -> bool {
-        self.fastest_proxy()
-            .is_some_and(|p| p.support_udp())
+        self.fastest_proxy().is_some_and(|p| p.support_udp())
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
@@ -104,14 +100,11 @@ impl Proxy for UrlTestGroup {
     }
 
     fn alive_for_url(&self, url: &str) -> bool {
-        self.fastest_proxy()
-            .is_some_and(|p| p.alive_for_url(url))
+        self.fastest_proxy().is_some_and(|p| p.alive_for_url(url))
     }
 
     fn last_delay(&self) -> u16 {
-        self.fastest_proxy()
-            .map(|p| p.last_delay())
-            .unwrap_or(0)
+        self.fastest_proxy().map(|p| p.last_delay()).unwrap_or(0)
     }
 
     fn last_delay_for_url(&self, url: &str) -> u16 {

@@ -39,11 +39,7 @@ impl MixedListener {
     }
 }
 
-async fn handle_connection(
-    tunnel: Tunnel,
-    stream: tokio::net::TcpStream,
-    src_addr: SocketAddr,
-) {
+async fn handle_connection(tunnel: Tunnel, stream: tokio::net::TcpStream, src_addr: SocketAddr) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
     match stream.peek(&mut peek).await {

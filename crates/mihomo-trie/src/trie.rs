@@ -23,9 +23,7 @@ impl<T> Node<T> {
 
 impl<T: Clone> DomainTrie<T> {
     pub fn new() -> Self {
-        DomainTrie {
-            root: Node::new(),
-        }
+        DomainTrie { root: Node::new() }
     }
 
     pub fn insert(&mut self, domain: &str, data: T) -> bool {
@@ -109,8 +107,8 @@ impl<T: Clone> DomainTrie<T> {
             return None;
         }
 
-        let (prefix, domain) = if domain.starts_with('.') {
-            (Some(DOT_WILDCARD), &domain[1..])
+        let (prefix, domain) = if let Some(stripped) = domain.strip_prefix('.') {
+            (Some(DOT_WILDCARD), stripped)
         } else {
             (None, domain)
         };

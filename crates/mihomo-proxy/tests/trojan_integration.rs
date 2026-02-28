@@ -76,10 +76,7 @@ async fn read_socks5_addr<R: AsyncReadExt + Unpin>(reader: &mut R) -> SocketAddr
             reader.read_exact(&mut ip).await.unwrap();
             let mut port = [0u8; 2];
             reader.read_exact(&mut port).await.unwrap();
-            SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::from(ip)),
-                u16::from_be_bytes(port),
-            )
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), u16::from_be_bytes(port))
         }
         0x04 => {
             let mut ip = [0u8; 16];
@@ -192,8 +189,7 @@ async fn test_trojan_tcp_relay() {
 
     // Start echo server and mock trojan server
     let (echo_addr, _echo_handle) = start_tcp_echo_server().await;
-    let (trojan_addr, _trojan_handle) =
-        start_mock_trojan_server(cert_der, key_der).await;
+    let (trojan_addr, _trojan_handle) = start_mock_trojan_server(cert_der, key_der).await;
 
     // Create adapter with skip_verify=true
     let adapter = TrojanAdapter::new(
@@ -216,7 +212,9 @@ async fn test_trojan_tcp_relay() {
 
     // Dial TCP through the Trojan proxy
     let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
-    let mut conn = result.expect("TCP dial timed out").expect("TCP dial failed");
+    let mut conn = result
+        .expect("TCP dial timed out")
+        .expect("TCP dial failed");
 
     // Write and read back
     let payload = b"hello trojan tcp";
@@ -247,8 +245,7 @@ async fn test_trojan_tcp_large_payload() {
 
     let (cert_der, key_der) = generate_self_signed_cert();
     let (echo_addr, _echo_handle) = start_tcp_echo_server().await;
-    let (trojan_addr, _trojan_handle) =
-        start_mock_trojan_server(cert_der, key_der).await;
+    let (trojan_addr, _trojan_handle) = start_mock_trojan_server(cert_der, key_der).await;
 
     let adapter = TrojanAdapter::new(
         "test-trojan",
@@ -268,7 +265,9 @@ async fn test_trojan_tcp_large_payload() {
     };
 
     let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
-    let mut conn = result.expect("TCP dial timed out").expect("TCP dial failed");
+    let mut conn = result
+        .expect("TCP dial timed out")
+        .expect("TCP dial failed");
 
     // Send a larger payload (64KB)
     let payload: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();

@@ -57,10 +57,8 @@ impl Resolver {
             config.add_name_server(NameServerConfig::new(addr, Protocol::Udp));
             config.add_name_server(NameServerConfig::new(addr, Protocol::Tcp));
         }
-        let mut builder = TokioResolver::builder_with_config(
-            config,
-            TokioConnectionProvider::default(),
-        );
+        let mut builder =
+            TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
         let opts = builder.options_mut();
         opts.timeout = Duration::from_secs(5);
         opts.attempts = 2;

@@ -119,9 +119,15 @@ async fn test_ss_tcp_relay() {
     let _ssserver = start_ssserver(ss_port).await;
 
     // Create adapter
-    let adapter =
-        ShadowsocksAdapter::new("test-ss", "127.0.0.1", ss_port, SS_PASSWORD, SS_CIPHER, false)
-            .unwrap();
+    let adapter = ShadowsocksAdapter::new(
+        "test-ss",
+        "127.0.0.1",
+        ss_port,
+        SS_PASSWORD,
+        SS_CIPHER,
+        false,
+    )
+    .unwrap();
 
     // Build metadata pointing to the echo server
     let metadata = Metadata {
@@ -133,7 +139,9 @@ async fn test_ss_tcp_relay() {
 
     // Dial TCP through the SS proxy
     let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
-    let mut conn = result.expect("TCP dial timed out").expect("TCP dial failed");
+    let mut conn = result
+        .expect("TCP dial timed out")
+        .expect("TCP dial failed");
 
     // Write and read back
     let payload = b"hello shadowsocks tcp";
@@ -171,9 +179,15 @@ async fn test_ss_udp_relay() {
     let _ssserver = start_ssserver(ss_port).await;
 
     // Create adapter with UDP enabled
-    let adapter =
-        ShadowsocksAdapter::new("test-ss", "127.0.0.1", ss_port, SS_PASSWORD, SS_CIPHER, true)
-            .unwrap();
+    let adapter = ShadowsocksAdapter::new(
+        "test-ss",
+        "127.0.0.1",
+        ss_port,
+        SS_PASSWORD,
+        SS_CIPHER,
+        true,
+    )
+    .unwrap();
 
     let metadata = Metadata {
         network: Network::Udp,
@@ -184,7 +198,9 @@ async fn test_ss_udp_relay() {
 
     // Dial UDP through the SS proxy
     let result = timeout(TIMEOUT, adapter.dial_udp(&metadata)).await;
-    let conn = result.expect("UDP dial timed out").expect("UDP dial failed");
+    let conn = result
+        .expect("UDP dial timed out")
+        .expect("UDP dial failed");
 
     // Write a packet and read it back
     let payload = b"hello shadowsocks udp";

@@ -111,15 +111,13 @@ async fn handle_socks5_inner(
     );
 
     match proxy.dial_tcp(&metadata).await {
-        Ok(mut remote) => {
-            match tokio::io::copy_bidirectional(stream, &mut remote).await {
-                Ok((up, down)) => {
-                    inner.stats.add_upload(up as i64);
-                    inner.stats.add_download(down as i64);
-                }
-                Err(e) => debug!("SOCKS5 relay error: {}", e),
+        Ok(mut remote) => match tokio::io::copy_bidirectional(stream, &mut remote).await {
+            Ok((up, down)) => {
+                inner.stats.add_upload(up as i64);
+                inner.stats.add_download(down as i64);
             }
-        }
+            Err(e) => debug!("SOCKS5 relay error: {}", e),
+        },
         Err(e) => warn!("SOCKS5 dial error: {}", e),
     }
 

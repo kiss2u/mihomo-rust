@@ -51,21 +51,13 @@ pub fn parse_rule(line: &str) -> Result<Box<dyn Rule>, String> {
                 .map(|r| Box::new(r) as Box<dyn Rule>)
                 .map_err(|e| format!("invalid CIDR: {}", e))
         }
-        "SRC-PORT" => {
-            PortRule::new(payload, adapter, true).map(|r| Box::new(r) as Box<dyn Rule>)
-        }
-        "DST-PORT" => {
-            PortRule::new(payload, adapter, false).map(|r| Box::new(r) as Box<dyn Rule>)
-        }
-        "NETWORK" => {
-            NetworkRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
-        }
+        "SRC-PORT" => PortRule::new(payload, adapter, true).map(|r| Box::new(r) as Box<dyn Rule>),
+        "DST-PORT" => PortRule::new(payload, adapter, false).map(|r| Box::new(r) as Box<dyn Rule>),
+        "NETWORK" => NetworkRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "PROCESS-NAME" => Ok(Box::new(ProcessRule::new(payload, adapter))),
         // GEOIP needs a reader, so it can't be parsed from a simple string.
         // It should be constructed via GeoIpRule::new() directly with the reader.
-        "GEOIP" => Err(
-            "GEOIP rules need a maxminddb reader; use GeoIpRule::new() directly".into(),
-        ),
+        "GEOIP" => Err("GEOIP rules need a maxminddb reader; use GeoIpRule::new() directly".into()),
         _ => Err(format!("unknown rule type: {}", rule_type)),
     }
 }

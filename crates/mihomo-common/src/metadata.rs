@@ -121,15 +121,31 @@ impl Metadata {
 impl fmt::Display for Metadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.host.is_empty() {
-            write!(f, "{}:{} --> {}:{} ({})",
-                self.source_address(), "",
-                self.host, self.dst_port, self.network)
+            write!(
+                f,
+                "{}: --> {}:{} ({})",
+                self.source_address(),
+                self.host,
+                self.dst_port,
+                self.network
+            )
         } else if let Some(ip) = self.dst_ip {
-            write!(f, "{} --> {}:{} ({})",
-                self.source_address(), ip, self.dst_port, self.network)
+            write!(
+                f,
+                "{} --> {}:{} ({})",
+                self.source_address(),
+                ip,
+                self.dst_port,
+                self.network
+            )
         } else {
-            write!(f, "{} --> :{} ({})",
-                self.source_address(), self.dst_port, self.network)
+            write!(
+                f,
+                "{} --> :{} ({})",
+                self.source_address(),
+                self.dst_port,
+                self.network
+            )
         }
     }
 }

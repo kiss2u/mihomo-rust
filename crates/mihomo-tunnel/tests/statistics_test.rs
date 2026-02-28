@@ -51,7 +51,12 @@ fn test_track_connection() {
     let stats = Statistics::new();
     let metadata = Metadata::default();
 
-    let id = stats.track_connection(metadata, "DOMAIN-SUFFIX", "google.com", vec!["DIRECT".to_string()]);
+    let id = stats.track_connection(
+        metadata,
+        "DOMAIN-SUFFIX",
+        "google.com",
+        vec!["DIRECT".to_string()],
+    );
 
     assert!(!id.is_empty());
     let conns = stats.active_connections();
@@ -98,12 +103,7 @@ fn test_multiple_connections() {
         "b.com",
         vec!["proxy2".to_string()],
     );
-    let id3 = stats.track_connection(
-        Metadata::default(),
-        "MATCH",
-        "",
-        vec!["DIRECT".to_string()],
-    );
+    let id3 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
 
     assert_eq!(stats.active_connections().len(), 3);
 
@@ -121,35 +121,23 @@ fn test_multiple_connections() {
 #[test]
 fn test_connection_unique_ids() {
     let stats = Statistics::new();
-    let id1 = stats.track_connection(
-        Metadata::default(),
-        "MATCH",
-        "",
-        vec!["DIRECT".to_string()],
-    );
-    let id2 = stats.track_connection(
-        Metadata::default(),
-        "MATCH",
-        "",
-        vec!["DIRECT".to_string()],
-    );
+    let id1 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
+    let id2 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
     assert_ne!(id1, id2, "Connection IDs must be unique");
 }
 
 #[test]
 fn test_connection_has_start_time() {
     let stats = Statistics::new();
-    let _id = stats.track_connection(
-        Metadata::default(),
-        "MATCH",
-        "",
-        vec!["DIRECT".to_string()],
-    );
+    let _id = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
 
     let conns = stats.active_connections();
     assert!(!conns[0].start.is_empty());
     // start is a Unix timestamp string
-    let ts: u64 = conns[0].start.parse().expect("start should be a valid number");
+    let ts: u64 = conns[0]
+        .start
+        .parse()
+        .expect("start should be a valid number");
     assert!(ts > 0, "timestamp should be positive");
 }
 

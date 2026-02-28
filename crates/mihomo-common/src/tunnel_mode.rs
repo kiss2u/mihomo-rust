@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TunnelMode {
     Global,
+    #[default]
     Rule,
     Direct,
 }
@@ -17,12 +18,6 @@ impl fmt::Display for TunnelMode {
             TunnelMode::Rule => write!(f, "rule"),
             TunnelMode::Direct => write!(f, "direct"),
         }
-    }
-}
-
-impl Default for TunnelMode {
-    fn default() -> Self {
-        TunnelMode::Rule
     }
 }
 

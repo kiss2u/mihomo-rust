@@ -109,9 +109,7 @@ impl DnsServer {
             if pos + 1 + len > data.len() {
                 return Err("DNS label truncated".into());
             }
-            labels.push(
-                String::from_utf8_lossy(&data[pos + 1..pos + 1 + len]).to_string(),
-            );
+            labels.push(String::from_utf8_lossy(&data[pos + 1..pos + 1 + len]).to_string());
             pos += 1 + len;
         }
 

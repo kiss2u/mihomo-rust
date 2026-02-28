@@ -42,8 +42,7 @@ impl ProxyAdapter for FallbackGroup {
     }
 
     fn support_udp(&self) -> bool {
-        self.first_alive()
-            .is_some_and(|p| p.support_udp())
+        self.first_alive().is_some_and(|p| p.support_udp())
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
@@ -71,14 +70,11 @@ impl Proxy for FallbackGroup {
     }
 
     fn alive_for_url(&self, url: &str) -> bool {
-        self.first_alive()
-            .is_some_and(|p| p.alive_for_url(url))
+        self.first_alive().is_some_and(|p| p.alive_for_url(url))
     }
 
     fn last_delay(&self) -> u16 {
-        self.first_alive()
-            .map(|p| p.last_delay())
-            .unwrap_or(0)
+        self.first_alive().map(|p| p.last_delay()).unwrap_or(0)
     }
 
     fn last_delay_for_url(&self, url: &str) -> u16 {

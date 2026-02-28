@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use mihomo_common::{AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result};
+use mihomo_common::{
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+};
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -104,7 +106,9 @@ impl ProxyAdapter for DirectAdapter {
     }
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(MihomoError::Io)?;
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(MihomoError::Io)?;
         Ok(Box::new(DirectPacketConn(socket)))
     }
 }

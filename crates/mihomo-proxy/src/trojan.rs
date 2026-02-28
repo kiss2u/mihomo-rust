@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use mihomo_common::{AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result};
+use mihomo_common::{
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+};
 use rustls::pki_types::ServerName;
 use sha2::{Digest, Sha224};
 use std::sync::Arc;
@@ -48,6 +50,7 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
     }
 }
 
+#[allow(dead_code)]
 pub struct TrojanAdapter {
     name: String,
     server: String,

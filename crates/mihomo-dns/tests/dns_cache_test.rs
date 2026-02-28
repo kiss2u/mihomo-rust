@@ -109,7 +109,10 @@ fn test_cache_lru_eviction() {
         Duration::from_secs(300),
     );
 
-    assert!(cache.get("first.com").is_none(), "first.com should be evicted");
+    assert!(
+        cache.get("first.com").is_none(),
+        "first.com should be evicted"
+    );
     assert!(cache.get("second.com").is_some());
     assert!(cache.get("third.com").is_some());
 }

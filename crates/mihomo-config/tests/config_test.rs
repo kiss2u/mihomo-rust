@@ -188,10 +188,7 @@ dns:
     - "8.8.4.4:53"
 "#;
     let config = load_config_from_str(yaml).unwrap();
-    assert_eq!(
-        config.dns.listen_addr.unwrap().to_string(),
-        "0.0.0.0:5353"
-    );
+    assert_eq!(config.dns.listen_addr.unwrap().to_string(), "0.0.0.0:5353");
 }
 
 #[test]

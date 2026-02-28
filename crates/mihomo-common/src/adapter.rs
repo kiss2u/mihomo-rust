@@ -1,7 +1,7 @@
+use crate::adapter_type::AdapterType;
 use crate::conn::{ProxyConn, ProxyPacketConn};
 use crate::error::Result;
 use crate::metadata::Metadata;
-use crate::adapter_type::AdapterType;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

@@ -4,7 +4,11 @@ use mihomo_dns::Resolver;
 use tokio::io;
 use tracing::{debug, info, warn};
 
-pub async fn handle_tcp(tunnel: &TunnelInner, mut conn: Box<dyn ProxyConn>, mut metadata: Metadata) {
+pub async fn handle_tcp(
+    tunnel: &TunnelInner,
+    mut conn: Box<dyn ProxyConn>,
+    mut metadata: Metadata,
+) {
     // Fix metadata: resolve FakeIP back to real host
     pre_handle_metadata(&mut metadata, &tunnel.resolver);
 
