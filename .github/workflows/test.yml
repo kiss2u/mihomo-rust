@@ -2,16 +2,36 @@ name: Test
 
 on:
   push:
-    paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
   pull_request:
-    paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
   test:
     runs-on: ubuntu-latest
+    needs: lint
     steps:
       - uses: actions/checkout@v4
 
@@ -38,11 +58,23 @@ jobs:
       - name: Unit tests
         run: cargo test --lib
 
+      - name: Common types tests
+        run: cargo test --test common_test -- --nocapture
+
+      - name: DNS cache tests
+        run: cargo test --test dns_cache_test -- --nocapture
+
+      - name: Config parsing tests
+        run: cargo test --test config_test -- --nocapture
+
+      - name: Statistics tests
+        run: cargo test --test statistics_test -- --nocapture
+
+      - name: Rules tests
+        run: cargo test --test rules_test -- --nocapture
+
       - name: Shadowsocks integration tests
         run: cargo test --test shadowsocks_integration -- --nocapture
 
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
-
-      - name: Rules tests
-        run: cargo test --test rules_test -- --nocapture
