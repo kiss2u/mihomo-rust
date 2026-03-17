@@ -2,10 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use mihomo_api::ApiServer;
 use mihomo_config::load_config;
+use mihomo_config::raw::RawConfig;
 use mihomo_dns::DnsServer;
 use mihomo_listener::{MixedListener, TunListener, TunListenerConfig};
 use mihomo_tunnel::Tunnel;
+use parking_lot::RwLock;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::{error, info};
 
 #[derive(Parser)]
@@ -37,6 +40,9 @@ fn main() -> Result<()> {
 
     info!("mihomo-rust starting...");
 
+    // Initialize rustls crypto provider (required for TLS-based proxy protocols)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Load config
     let config_path = if let Some(dir) = &args.directory {
         format!("{}/{}", dir, args.config)
@@ -57,10 +63,13 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async move { run(config).await })
+    runtime.block_on(async move { run(config, config_path).await })
 }
 
-async fn run(config: mihomo_config::Config) -> Result<()> {
+async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
+    // Keep raw config in shared state for runtime mutations
+    let raw_config = Arc::new(RwLock::new(config.raw.clone()));
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(config.dns.resolver.clone());
     tunnel.set_mode(config.general.mode);
@@ -79,11 +88,27 @@ async fn run(config: mihomo_config::Config) -> Result<()> {
 
     // Start REST API if configured
     if let Some(api_addr) = config.api.external_controller {
-        let api_server = ApiServer::new(tunnel.clone(), api_addr, config.api.secret.clone());
+        let api_server = ApiServer::new(
+            tunnel.clone(),
+            api_addr,
+            config.api.secret.clone(),
+            config_path.clone(),
+            raw_config.clone(),
+        );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {
                 error!("API server error: {}", e);
             }
+        });
+    }
+
+    // Start subscription background refresh task
+    {
+        let raw_config = raw_config.clone();
+        let tunnel = tunnel.clone();
+        let config_path = config_path.clone();
+        tokio::spawn(async move {
+            subscription_refresh_loop(raw_config, tunnel, config_path).await;
         });
     }
 
@@ -149,4 +174,70 @@ async fn run(config: mihomo_config::Config) -> Result<()> {
     info!("Shutting down...");
 
     Ok(())
+}
+
+async fn subscription_refresh_loop(
+    raw_config: Arc<RwLock<RawConfig>>,
+    tunnel: Tunnel,
+    _config_path: String,
+) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+        let subs_to_refresh: Vec<(String, String)> = {
+            let raw = raw_config.read();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            raw.subscriptions
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter(|s| {
+                    if let (Some(interval), Some(last)) = (s.interval, s.last_updated) {
+                        now - last >= interval as i64
+                    } else {
+                        false
+                    }
+                })
+                .map(|s| (s.name.clone(), s.url.clone()))
+                .collect()
+        };
+
+        for (name, url) in subs_to_refresh {
+            info!("Auto-refreshing subscription '{}'", name);
+            match mihomo_config::subscription::fetch_subscription(&url).await {
+                Ok(fetched) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+
+                    let mut raw = raw_config.write();
+
+                    if let Some(ref mut subs) = raw.subscriptions {
+                        if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
+                            sub.last_updated = Some(now);
+                        }
+                    }
+
+                    // Replace with remote data as-is
+                    raw.proxies = Some(fetched.proxies);
+                    raw.proxy_groups = Some(fetched.proxy_groups);
+                    raw.rules = Some(fetched.rules);
+
+                    match mihomo_config::rebuild_from_raw(&raw) {
+                        Ok((new_proxies, new_rules)) => {
+                            tunnel.update_proxies(new_proxies);
+                            tunnel.update_rules(new_rules);
+                            info!("Subscription '{}' refreshed successfully", name);
+                        }
+                        Err(e) => error!("Failed to rebuild after refreshing '{}': {}", name, e),
+                    }
+                }
+                Err(e) => error!("Failed to refresh subscription '{}': {}", name, e),
+            }
+        }
+    }
 }

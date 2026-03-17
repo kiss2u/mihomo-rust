@@ -7,16 +7,24 @@ edition.workspace = true
 mihomo-common = { workspace = true }
 mihomo-tunnel = { workspace = true }
 mihomo-dns = { workspace = true }
+mihomo-config = { workspace = true }
+mihomo-proxy = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 futures = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+mihomo-trie = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"
+tempfile = "3"

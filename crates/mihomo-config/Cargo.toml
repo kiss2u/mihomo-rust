@@ -9,9 +9,6 @@ mihomo-trie = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-rules = { workspace = true }
 mihomo-proxy = { workspace = true }
-mihomo-tunnel = { workspace = true }
-mihomo-listener = { workspace = true }
-mihomo-api = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -20,6 +17,8 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

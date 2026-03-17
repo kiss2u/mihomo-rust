@@ -2,6 +2,7 @@ pub mod dns_parser;
 pub mod proxy_parser;
 pub mod raw;
 pub mod rule_parser;
+pub mod subscription;
 
 use mihomo_common::{Proxy, Rule, TunnelMode};
 use mihomo_dns::Resolver;
@@ -18,6 +19,7 @@ pub struct Config {
     pub rules: Vec<Box<dyn Rule>>,
     pub listeners: ListenerConfig,
     pub api: ApiConfig,
+    pub raw: raw::RawConfig,
 }
 
 pub struct GeneralConfig {
@@ -64,6 +66,90 @@ pub fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
     build_config(raw)
 }
 
+/// Save a RawConfig back to disk with atomic write (.tmp → rename) and .bak backup.
+pub fn save_raw_config(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::Error> {
+    let yaml = serde_yaml::to_string(raw)?;
+    let tmp_path = format!("{}.tmp", path);
+    let bak_path = format!("{}.bak", path);
+    std::fs::write(&tmp_path, yaml)?;
+    if std::path::Path::new(path).exists() {
+        // Keep one backup
+        let _ = std::fs::rename(path, &bak_path);
+    }
+    std::fs::rename(&tmp_path, path)?;
+    info!("Config saved to {}", path);
+    Ok(())
+}
+
+/// Rebuild proxies and rules from a RawConfig (used for runtime updates).
+pub fn rebuild_from_raw(
+    raw: &raw::RawConfig,
+) -> Result<(HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>), anyhow::Error> {
+    let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
+    // Built-in proxies
+    proxies.insert(
+        "DIRECT".to_string(),
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(
+            mihomo_proxy::DirectAdapter::new(),
+        ))),
+    );
+    proxies.insert(
+        "REJECT".to_string(),
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(
+            mihomo_proxy::RejectAdapter::new(false),
+        ))),
+    );
+    proxies.insert(
+        "REJECT-DROP".to_string(),
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(
+            mihomo_proxy::RejectAdapter::new(true),
+        ))),
+    );
+
+    for raw_proxy in raw.proxies.as_deref().unwrap_or(&[]) {
+        match proxy_parser::parse_proxy(raw_proxy) {
+            Ok(proxy) => {
+                let name = proxy.name().to_string();
+                proxies.insert(name, proxy);
+            }
+            Err(e) => warn!("Failed to parse proxy: {}", e),
+        }
+    }
+
+    // Multi-pass group resolution: groups can reference other groups.
+    // Keep trying until no new groups are resolved.
+    let raw_groups = raw.proxy_groups.as_deref().unwrap_or(&[]);
+    let mut remaining: Vec<&raw::RawProxyGroup> = raw_groups.iter().collect();
+    let mut max_passes = remaining.len() + 1;
+    while !remaining.is_empty() && max_passes > 0 {
+        max_passes -= 1;
+        let mut still_remaining = Vec::new();
+        for raw_group in &remaining {
+            match proxy_parser::parse_proxy_group(raw_group, &proxies) {
+                Ok(group) => {
+                    let name = group.name().to_string();
+                    proxies.insert(name, group);
+                }
+                Err(_) => {
+                    still_remaining.push(*raw_group);
+                }
+            }
+        }
+        if still_remaining.len() == remaining.len() {
+            // No progress — log remaining failures and break
+            for raw_group in &still_remaining {
+                warn!("Failed to parse proxy group '{}': unresolved dependencies", raw_group.name);
+            }
+            break;
+        }
+        remaining = still_remaining;
+    }
+
+    let rules = rule_parser::parse_rules(raw.rules.as_deref().unwrap_or(&[]));
+
+    Ok((proxies, rules))
+}
+
 fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
     // General config
     let mode = raw
@@ -89,46 +175,8 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
     // DNS
     let dns_config = dns_parser::parse_dns(&raw)?;
 
-    // Proxies
-    let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
-    // Add built-in proxies
-    let direct = Arc::new(proxy_parser::WrappedProxy::new(Box::new(
-        mihomo_proxy::DirectAdapter::new(),
-    )));
-    let reject = Arc::new(proxy_parser::WrappedProxy::new(Box::new(
-        mihomo_proxy::RejectAdapter::new(false),
-    )));
-    let reject_drop = Arc::new(proxy_parser::WrappedProxy::new(Box::new(
-        mihomo_proxy::RejectAdapter::new(true),
-    )));
-    proxies.insert("DIRECT".to_string(), direct);
-    proxies.insert("REJECT".to_string(), reject);
-    proxies.insert("REJECT-DROP".to_string(), reject_drop);
-
-    // Parse user proxies
-    for raw_proxy in raw.proxies.unwrap_or_default() {
-        match proxy_parser::parse_proxy(&raw_proxy) {
-            Ok(proxy) => {
-                let name = proxy.name().to_string();
-                proxies.insert(name, proxy);
-            }
-            Err(e) => warn!("Failed to parse proxy: {}", e),
-        }
-    }
-
-    // Parse proxy groups (after individual proxies are registered)
-    for raw_group in raw.proxy_groups.unwrap_or_default() {
-        match proxy_parser::parse_proxy_group(&raw_group, &proxies) {
-            Ok(group) => {
-                let name = group.name().to_string();
-                proxies.insert(name, group);
-            }
-            Err(e) => warn!("Failed to parse proxy group: {}", e),
-        }
-    }
-
-    // Rules
-    let rules = rule_parser::parse_rules(&raw.rules.unwrap_or_default());
+    // Proxies and rules via rebuild
+    let (proxies, rules) = rebuild_from_raw(&raw)?;
 
     // Listener config
     let bind_addr = if general.allow_lan {
@@ -144,19 +192,21 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
     };
 
     // TUN config
-    let tun = raw.tun.map(|raw_tun| {
+    let tun = raw.tun.as_ref().map(|raw_tun| {
         let dns_hijack = raw_tun
             .dns_hijack
-            .unwrap_or_default()
+            .as_deref()
+            .unwrap_or(&[])
             .iter()
             .filter_map(|s| s.parse::<SocketAddr>().ok())
             .collect();
         TunConfig {
             enable: raw_tun.enable.unwrap_or(false),
-            device: raw_tun.device,
+            device: raw_tun.device.clone(),
             mtu: raw_tun.mtu.unwrap_or(1500),
             inet4_address: raw_tun
                 .inet4_address
+                .clone()
                 .unwrap_or_else(|| "198.18.0.1/16".to_string()),
             dns_hijack,
             auto_route: raw_tun.auto_route.unwrap_or(false),
@@ -169,7 +219,7 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
             .external_controller
             .as_deref()
             .and_then(|s| s.parse().ok()),
-        secret: raw.secret,
+        secret: raw.secret.clone(),
     };
 
     info!(
@@ -187,5 +237,6 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
         rules,
         listeners,
         api,
+        raw,
     })
 }

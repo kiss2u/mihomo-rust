@@ -78,6 +78,10 @@ impl ProxyAdapter for SelectorGroup {
 }
 
 impl Proxy for SelectorGroup {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn alive(&self) -> bool {
         self.selected_proxy().is_some_and(|p| p.alive())
     }

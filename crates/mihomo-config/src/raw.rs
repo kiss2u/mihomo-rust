@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
     pub port: Option<u16>,
@@ -19,9 +19,10 @@ pub struct RawConfig {
     pub proxies: Option<Vec<HashMap<String, serde_yaml::Value>>>,
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
     pub rules: Option<Vec<String>>,
+    pub subscriptions: Option<Vec<RawSubscription>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawTun {
     pub enable: Option<bool>,
@@ -32,7 +33,7 @@ pub struct RawTun {
     pub auto_route: Option<bool>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawDns {
     pub enable: Option<bool>,
@@ -44,7 +45,7 @@ pub struct RawDns {
     pub fake_ip_filter: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawProxyGroup {
     pub name: String,
@@ -54,4 +55,13 @@ pub struct RawProxyGroup {
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawSubscription {
+    pub name: String,
+    pub url: String,
+    pub interval: Option<u64>,
+    pub last_updated: Option<i64>,
 }

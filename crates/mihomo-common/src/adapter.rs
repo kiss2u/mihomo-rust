@@ -38,4 +38,7 @@ pub trait Proxy: ProxyAdapter {
     fn last_delay(&self) -> u16;
     fn last_delay_for_url(&self, url: &str) -> u16;
     fn delay_history(&self) -> Vec<DelayHistory>;
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
