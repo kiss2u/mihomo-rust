@@ -15,7 +15,7 @@ use tracing::{error, info};
 #[command(name = "mihomo", version, about = "A rule-based tunnel in Rust")]
 struct Args {
     /// Path to configuration file
-    #[arg(short = 'f', long = "config", default_value = "config.yaml")]
+    #[arg(short = 'f', long = "config", default_value = "config.example.yaml")]
     config: String,
 
     /// Home directory
