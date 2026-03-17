@@ -76,6 +76,12 @@ jobs:
       - name: Shadowsocks integration tests
         run: cargo test --test shadowsocks_integration -- --nocapture
 
+      - name: API integration tests
+        run: cargo test --test api_test -- --nocapture
+
+      - name: Config persistence tests
+        run: cargo test --test config_persistence_test -- --nocapture
+
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
 

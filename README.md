@@ -1,19 +1,19 @@
 # mihomo-rust
 
-A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, DNS with FakeIP, and a REST API for runtime control.
+A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, DNS with FakeIP, TUN mode, a REST API, and a built-in web dashboard.
 
 ## Features
 
 ### Proxy Protocols
-- **Shadowsocks** — TCP and UDP relay, AEAD and stream ciphers (aes-256-gcm, chacha20-ietf-poly1305, etc.)
-- **Trojan** — TLS 1.2/1.3 via rustls, SNI, optional skip-cert-verify
-- **Direct** — Direct connection to destination
-- **Reject** — Drop connections (with configurable behavior)
+- **Shadowsocks** -- TCP and UDP relay, AEAD and stream ciphers (aes-256-gcm, chacha20-ietf-poly1305, etc.)
+- **Trojan** -- TLS 1.2/1.3 via rustls, SNI, optional skip-cert-verify
+- **Direct** -- Direct connection to destination
+- **Reject** -- Drop connections (with configurable behavior)
 
 ### Proxy Groups
-- **Selector** — Manual proxy selection via REST API
-- **URLTest** — Automatic selection based on latency with tolerance threshold
-- **Fallback** — Automatic failover to first alive proxy
+- **Selector** -- Manual proxy selection via REST API or web UI
+- **URLTest** -- Automatic selection based on latency with tolerance threshold
+- **Fallback** -- Automatic failover to first alive proxy
 
 ### Rule Engine
 | Rule | Example | Description |
@@ -40,9 +40,26 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 - Response caching and in-flight request deduplication
 
 ### Inbound Listeners
-- **Mixed** — Auto-detects HTTP or SOCKS5 on a single port
-- **HTTP Proxy** — HTTP CONNECT and plain HTTP forwarding
-- **SOCKS5** — SOCKS5 with optional authentication
+- **Mixed** -- Auto-detects HTTP or SOCKS5 on a single port
+- **HTTP Proxy** -- HTTP CONNECT and plain HTTP forwarding
+- **SOCKS5** -- SOCKS5 with optional authentication
+- **TUN** -- User-space TCP/IP stack via netstack-smoltcp
+
+### Web Dashboard
+
+Built-in web UI served at `http://<api-addr>/ui` with:
+
+- **Overview** -- Mode selector, listening ports, live traffic stats
+- **Proxies** -- Click-to-switch selector groups, view all proxy group members
+- **Subscriptions** -- Add/refresh/delete Clash YAML subscription URLs (auto-cached to disk)
+- **Proxy Groups** -- Create/edit/delete selector, url-test, fallback groups
+- **Rules** -- Add/delete/reorder rules with drag-and-drop, search/filter
+
+### Subscription Management
+- Fetch and import Clash YAML subscriptions (proxies, groups, rules)
+- Auto-save to disk -- cached data loads on restart without re-fetching
+- Background refresh on configurable intervals
+- Multi-pass group resolution for inter-group references
 
 ### REST API
 | Endpoint | Method | Description |
@@ -50,12 +67,22 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 | `/version` | GET | Version info |
 | `/proxies` | GET | List all proxies |
 | `/proxies/{name}` | GET/PUT | Get or switch proxy |
-| `/rules` | GET | List active rules |
+| `/rules` | GET/POST/PUT | List, replace, or update rules |
+| `/rules/{index}` | DELETE | Delete rule at index |
+| `/rules/reorder` | POST | Reorder rules |
 | `/connections` | GET | Active connections with traffic stats |
 | `/connections/{id}` | DELETE | Close a connection |
-| `/configs` | GET/PATCH | Get or update running config |
+| `/configs` | GET/PATCH | Get config (incl. ports) or update mode |
 | `/traffic` | GET | Upload/download statistics |
 | `/dns/query` | POST | Direct DNS query |
+| `/api/config/save` | POST | Save running config to disk |
+| `/api/subscriptions` | GET/POST | List or add subscriptions |
+| `/api/subscriptions/{name}` | DELETE | Delete subscription |
+| `/api/subscriptions/{name}/refresh` | POST | Refresh subscription |
+| `/api/proxy-groups` | GET/POST | List or create proxy groups |
+| `/api/proxy-groups/{name}` | PUT/DELETE | Update or delete proxy group |
+| `/api/proxy-groups/{name}/select` | PUT | Switch selector proxy |
+| `/ui` | GET | Web dashboard |
 
 ### Tunnel
 - Three routing modes: **Rule**, **Global**, **Direct**
@@ -65,7 +92,7 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 ## Architecture
 
 ```
-Listeners (HTTP/SOCKS5/Mixed)
+Listeners (HTTP/SOCKS5/Mixed/TUN)
         |
         v
     Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal)
@@ -75,7 +102,7 @@ Listeners (HTTP/SOCKS5/Mixed)
         v
   Proxy Adapters / Groups  --->  Remote Server
 
-  REST API Server (Axum)   --->  Runtime control
+  REST API Server (Axum)   --->  Runtime control + Web UI
 ```
 
 10 workspace crates with clear separation of concerns:
@@ -88,12 +115,14 @@ Listeners (HTTP/SOCKS5/Mixed)
 | `mihomo-rules` | Rule matching engine and parser |
 | `mihomo-dns` | DNS resolver, FakeIP pool, cache, server |
 | `mihomo-tunnel` | Core routing, TCP/UDP relay, statistics |
-| `mihomo-listener` | Inbound protocol handlers |
-| `mihomo-config` | YAML configuration parsing |
-| `mihomo-api` | REST API (Axum) |
+| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TUN) |
+| `mihomo-config` | YAML configuration parsing, subscription fetcher, config persistence |
+| `mihomo-api` | REST API (Axum) + embedded web UI |
 | `mihomo-app` | CLI entry point |
 
-## Build
+## Quick Start
+
+### Build
 
 Requires Rust 1.70+.
 
@@ -101,14 +130,42 @@ Requires Rust 1.70+.
 cargo build --release
 ```
 
-## Usage
+### Run
 
 ```bash
-# Run with config file
+# Copy the example config and edit it
+cp config.example.yaml config.yaml
+# Edit config.yaml with your proxy servers...
+
+# Run
 ./target/release/mihomo -f config.yaml
 
 # Test config validity
 ./target/release/mihomo -f config.yaml -t
+```
+
+### Open the Web UI
+
+After starting, open your browser to:
+
+```
+http://127.0.0.1:9090/ui
+```
+
+From the **Subscriptions** tab you can add a Clash subscription URL to import proxies, groups, and rules automatically.
+
+### Use the Proxy
+
+```bash
+# HTTP proxy
+curl --proxy http://127.0.0.1:7890 https://ipinfo.io
+
+# SOCKS5 proxy
+curl --proxy socks5://127.0.0.1:7890 https://ipinfo.io
+
+# Set as system proxy (macOS)
+export https_proxy=http://127.0.0.1:7890
+export http_proxy=http://127.0.0.1:7890
 ```
 
 ### Example Configuration
@@ -166,14 +223,20 @@ rules:
   - MATCH,Proxy
 ```
 
+See [`config.example.yaml`](config.example.yaml) for a full annotated example.
+
 ## Testing
 
 ```bash
-# Unit tests
+# All unit tests
 cargo test --lib
 
 # Rules tests (78 tests covering all rule types)
 cargo test --test rules_test
+
+# API and config persistence tests (54 tests)
+cargo test --test api_test
+cargo test --test config_persistence_test
 
 # Trojan integration tests (embedded mock server, no external deps)
 cargo test --test trojan_integration
