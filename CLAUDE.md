@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), DNS with FakeIP, TUN mode, and a REST API for runtime control. Licensed under GPL-3.0.
+Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), DNS with FakeIP, and a REST API for runtime control. Licensed under GPL-3.0.
 
 ## Build Commands
 
@@ -39,7 +39,7 @@ cargo clippy --all-targets
 ## Architecture
 
 ```
-Listeners (HTTP/SOCKS5/Mixed/TUN)
+Listeners (HTTP/SOCKS5/Mixed)
         |
         v
     Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal)
@@ -62,14 +62,14 @@ Listeners (HTTP/SOCKS5/Mixed/TUN)
 | `mihomo-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
 | `mihomo-dns` | DNS resolver, FakeIP pool, cache, UDP server |
 | `mihomo-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
-| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5, TUN via netstack-smoltcp) |
+| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5) |
 | `mihomo-config` | YAML configuration parsing into typed structs |
 | `mihomo-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
 | `mihomo-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API |
 
 ### Startup Flow
 
-`mihomo-app/src/main.rs` → parse CLI args → `mihomo_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP/TUN) as tokio tasks → await ctrl-c.
+`mihomo-app/src/main.rs` → parse CLI args → `mihomo_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP) as tokio tasks → await ctrl-c.
 
 ### Key Patterns
 
@@ -95,6 +95,5 @@ Listeners (HTTP/SOCKS5/Mixed/TUN)
 - **Async runtime**: tokio (multi-threaded)
 - **Proxy protocols**: `shadowsocks` crate for SS; `tokio-rustls`/`rustls` for Trojan TLS
 - **DNS**: `hickory-resolver`/`hickory-server`/`hickory-proto`
-- **TUN**: `tun-rs` + `netstack-smoltcp` (user-space TCP/IP stack)
 - **Web framework**: axum + tower
 - **GeoIP**: `maxminddb`

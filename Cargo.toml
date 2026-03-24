@@ -85,11 +85,6 @@ bytes = "1"
 # Futures
 futures = "0.3"
 
-# TUN
-tun-rs = { version = "2", features = ["async"] }
-netstack-smoltcp = "0.2"
-etherparse = "0.19"
-
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 

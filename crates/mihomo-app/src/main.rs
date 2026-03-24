@@ -4,7 +4,7 @@ use mihomo_api::ApiServer;
 use mihomo_config::load_config;
 use mihomo_config::raw::RawConfig;
 use mihomo_dns::DnsServer;
-use mihomo_listener::{MixedListener, TunListener, TunListenerConfig};
+use mihomo_listener::MixedListener;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -316,28 +316,6 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
                 error!("HTTP listener error: {}", e);
             }
         });
-    }
-
-    // Start TUN listener if configured and enabled
-    if let Some(ref tun_config) = config.tun {
-        if tun_config.enable {
-            let tun_listener_config = TunListenerConfig {
-                device: tun_config.device.clone(),
-                mtu: tun_config.mtu,
-                inet4_address: tun_config.inet4_address.clone(),
-                dns_hijack: tun_config.dns_hijack.clone(),
-            };
-            let tun = TunListener::new(
-                tunnel.clone(),
-                tun_listener_config,
-                config.dns.resolver.clone(),
-            );
-            tokio::spawn(async move {
-                if let Err(e) = tun.run().await {
-                    error!("TUN listener error: {}", e);
-                }
-            });
-        }
     }
 
     info!("mihomo-rust is running");

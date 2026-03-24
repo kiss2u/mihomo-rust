@@ -13,9 +13,6 @@ thiserror = { workspace = true }
 bytes = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
-tun-rs = { workspace = true }
-netstack-smoltcp = { workspace = true }
-etherparse = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

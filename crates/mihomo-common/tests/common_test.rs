@@ -56,7 +56,6 @@ fn test_conn_type_display() {
         (ConnType::TProxy, "TProxy"),
         (ConnType::Trojan, "Trojan"),
         (ConnType::Tunnel, "Tunnel"),
-        (ConnType::Tun, "Tun"),
         (ConnType::Tuic, "Tuic"),
         (ConnType::Hysteria2, "Hysteria2"),
         (ConnType::Inner, "Inner"),

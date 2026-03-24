@@ -15,22 +15,10 @@ pub struct RawConfig {
     pub external_controller: Option<String>,
     pub secret: Option<String>,
     pub dns: Option<RawDns>,
-    pub tun: Option<RawTun>,
     pub proxies: Option<Vec<HashMap<String, serde_yaml::Value>>>,
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
     pub rules: Option<Vec<String>>,
     pub subscriptions: Option<Vec<RawSubscription>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "kebab-case")]
-pub struct RawTun {
-    pub enable: Option<bool>,
-    pub device: Option<String>,
-    pub mtu: Option<u16>,
-    pub inet4_address: Option<String>,
-    pub dns_hijack: Option<Vec<String>>,
-    pub auto_route: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

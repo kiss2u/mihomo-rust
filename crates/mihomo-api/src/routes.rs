@@ -195,8 +195,6 @@ struct ConfigResponse {
     http_port: Option<u16>,
     #[serde(rename = "external-controller", skip_serializing_if = "Option::is_none")]
     external_controller: Option<String>,
-    #[serde(rename = "tun-enabled")]
-    tun_enabled: bool,
 }
 
 async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
@@ -208,7 +206,6 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
         socks_port: raw.socks_port,
         http_port: raw.port,
         external_controller: raw.external_controller.clone(),
-        tun_enabled: raw.tun.as_ref().and_then(|t| t.enable).unwrap_or(false),
     })
 }
 

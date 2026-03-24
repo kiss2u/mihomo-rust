@@ -14,7 +14,6 @@ use tracing::{info, warn};
 pub struct Config {
     pub general: GeneralConfig,
     pub dns: DnsConfig,
-    pub tun: Option<TunConfig>,
     pub proxies: HashMap<String, Arc<dyn Proxy>>,
     pub rules: Vec<Box<dyn Rule>>,
     pub listeners: ListenerConfig,
@@ -45,15 +44,6 @@ pub struct ListenerConfig {
 pub struct ApiConfig {
     pub external_controller: Option<SocketAddr>,
     pub secret: Option<String>,
-}
-
-pub struct TunConfig {
-    pub enable: bool,
-    pub device: Option<String>,
-    pub mtu: u16,
-    pub inet4_address: String,
-    pub dns_hijack: Vec<SocketAddr>,
-    pub auto_route: bool,
 }
 
 pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
@@ -191,28 +181,6 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
         bind_address: bind_addr,
     };
 
-    // TUN config
-    let tun = raw.tun.as_ref().map(|raw_tun| {
-        let dns_hijack = raw_tun
-            .dns_hijack
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(|s| s.parse::<SocketAddr>().ok())
-            .collect();
-        TunConfig {
-            enable: raw_tun.enable.unwrap_or(false),
-            device: raw_tun.device.clone(),
-            mtu: raw_tun.mtu.unwrap_or(1500),
-            inet4_address: raw_tun
-                .inet4_address
-                .clone()
-                .unwrap_or_else(|| "198.18.0.1/16".to_string()),
-            dns_hijack,
-            auto_route: raw_tun.auto_route.unwrap_or(false),
-        }
-    });
-
     // API config
     let api = ApiConfig {
         external_controller: raw
@@ -232,7 +200,6 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
     Ok(Config {
         general,
         dns: dns_config,
-        tun,
         proxies,
         rules,
         listeners,
