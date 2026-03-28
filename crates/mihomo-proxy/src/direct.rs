@@ -11,9 +11,7 @@ pub struct DirectAdapter {
 
 impl DirectAdapter {
     pub fn new() -> Self {
-        Self {
-            routing_mark: None,
-        }
+        Self { routing_mark: None }
     }
 
     pub fn with_routing_mark(routing_mark: u32) -> Self {
@@ -93,10 +91,7 @@ impl ProxyPacketConn for DirectPacketConn {
 
 /// Create a TCP socket with an optional routing mark (SO_MARK on Linux)
 /// set BEFORE connecting, so the SYN packet is already marked.
-async fn connect_with_mark(
-    addr: &str,
-    routing_mark: Option<u32>,
-) -> std::io::Result<TcpStream> {
+async fn connect_with_mark(addr: &str, routing_mark: Option<u32>) -> std::io::Result<TcpStream> {
     #[cfg(target_os = "linux")]
     if let Some(mark) = routing_mark {
         use socket2::{Domain, Protocol, Socket, Type};

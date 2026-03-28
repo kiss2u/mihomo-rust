@@ -16,10 +16,16 @@ impl FirewallGuard {
     /// - **Linux**: `meta mark` matching — DIRECT adapter sets SO_MARK on outbound sockets,
     ///   nftables skips packets with that mark. Plus IP bypass for upstream proxy servers.
     /// - **macOS**: `user` UID matching (pf has no mark support) + IP bypass.
-    pub fn setup(listen_port: u16, routing_mark: Option<u32>, bypass_ips: &[IpAddr]) -> io::Result<Self> {
+    pub fn setup(
+        listen_port: u16,
+        routing_mark: Option<u32>,
+        bypass_ips: &[IpAddr],
+    ) -> io::Result<Self> {
         info!(
             "Setting up transparent proxy firewall rules (port={}, mark={:?}, bypass={})",
-            listen_port, routing_mark, bypass_ips.len()
+            listen_port,
+            routing_mark,
+            bypass_ips.len()
         );
         let inner = PlatformGuard::setup(listen_port, routing_mark, bypass_ips)?;
         Ok(FirewallGuard { inner })
@@ -50,7 +56,11 @@ struct PlatformGuard {
 
 #[cfg(target_os = "macos")]
 impl PlatformGuard {
-    fn setup(listen_port: u16, _routing_mark: Option<u32>, bypass_ips: &[IpAddr]) -> io::Result<Self> {
+    fn setup(
+        listen_port: u16,
+        _routing_mark: Option<u32>,
+        bypass_ips: &[IpAddr],
+    ) -> io::Result<Self> {
         let anchor = "com.mihomo.tproxy".to_string();
         let uid = unsafe { libc::getuid() };
 
@@ -62,7 +72,9 @@ impl PlatformGuard {
         let mut rules = format!("pass out quick on lo0 proto tcp from any to any user {uid}\n");
         rules.push_str("pass out quick on lo0 proto tcp from any to 127.0.0.0/8\n");
         for ip in bypass_ips {
-            rules.push_str(&format!("pass out quick on lo0 proto tcp from any to {ip}\n"));
+            rules.push_str(&format!(
+                "pass out quick on lo0 proto tcp from any to {ip}\n"
+            ));
         }
         rules.push_str(&format!(
             "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {port}\n",
@@ -88,8 +100,16 @@ impl PlatformGuard {
 
         let _ = Command::new("pfctl").arg("-e").output();
 
-        info!("pf anchor '{}' loaded (uid={}, {} bypass IPs)", anchor, uid, bypass_ips.len());
-        Ok(PlatformGuard { anchor, torn_down: false })
+        info!(
+            "pf anchor '{}' loaded (uid={}, {} bypass IPs)",
+            anchor,
+            uid,
+            bypass_ips.len()
+        );
+        Ok(PlatformGuard {
+            anchor,
+            torn_down: false,
+        })
     }
 
     fn teardown(&mut self) -> io::Result<()> {
@@ -124,7 +144,11 @@ struct PlatformGuard {
 
 #[cfg(target_os = "linux")]
 impl PlatformGuard {
-    fn setup(listen_port: u16, routing_mark: Option<u32>, bypass_ips: &[IpAddr]) -> io::Result<Self> {
+    fn setup(
+        listen_port: u16,
+        routing_mark: Option<u32>,
+        bypass_ips: &[IpAddr],
+    ) -> io::Result<Self> {
         let table_name = "mihomo_tproxy".to_string();
 
         let mut bypass_rules = String::new();
@@ -188,9 +212,14 @@ impl PlatformGuard {
 
         info!(
             "nftables table '{}' created (mark={:?}, {} bypass IPs)",
-            table_name, routing_mark, bypass_ips.len()
+            table_name,
+            routing_mark,
+            bypass_ips.len()
         );
-        Ok(PlatformGuard { table_name, torn_down: false })
+        Ok(PlatformGuard {
+            table_name,
+            torn_down: false,
+        })
     }
 
     fn teardown(&mut self) -> io::Result<()> {
@@ -220,7 +249,11 @@ struct PlatformGuard;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl PlatformGuard {
-    fn setup(_listen_port: u16, _routing_mark: Option<u32>, _bypass_ips: &[IpAddr]) -> io::Result<Self> {
+    fn setup(
+        _listen_port: u16,
+        _routing_mark: Option<u32>,
+        _bypass_ips: &[IpAddr],
+    ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "transparent proxy firewall not supported on this platform",

@@ -69,19 +69,14 @@ mod macos {
         dxport: [u8; 2], // dest port (network byte order)
         rsxport: [u8; 2],
         rdxport: [u8; 2],
-        af: u8,         // address family
-        proto: u8,      // protocol (IPPROTO_TCP)
+        af: u8,    // address family
+        proto: u8, // protocol (IPPROTO_TCP)
         proto_variant: u8,
-        direction: u8,  // PF_IN or PF_OUT
+        direction: u8, // PF_IN or PF_OUT
     }
 
-    pub fn get_original_dst(
-        stream: &TcpStream,
-        listen_addr: SocketAddr,
-    ) -> io::Result<SocketAddr> {
-        let peer = stream
-            .peer_addr()
-            .map_err(io::Error::other)?;
+    pub fn get_original_dst(stream: &TcpStream, listen_addr: SocketAddr) -> io::Result<SocketAddr> {
+        let peer = stream.peer_addr().map_err(io::Error::other)?;
 
         // We only support IPv4 currently
         let (peer_ip, peer_port) = match peer {

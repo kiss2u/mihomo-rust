@@ -467,8 +467,7 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
     info!("mihomo-rust is running");
 
     // Wait for shutdown signal (SIGINT or SIGTERM)
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm.recv() => {},
