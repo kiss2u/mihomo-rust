@@ -1,6 +1,6 @@
 # mihomo-rust
 
-A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, DNS with FakeIP, TUN mode, a REST API, and a built-in web dashboard.
+A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, transparent proxy, DNS snooping, a REST API, and a built-in web dashboard.
 
 ## Features
 
@@ -38,12 +38,23 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 - Main + fallback nameserver groups
 - **FakeIP** mode for transparent proxying (configurable CIDR range)
 - Response caching and in-flight request deduplication
+- **DNS snooping** -- reverse IP→domain lookup table for transparent proxy hostname recovery
 
 ### Inbound Listeners
 - **Mixed** -- Auto-detects HTTP or SOCKS5 on a single port
 - **HTTP Proxy** -- HTTP CONNECT and plain HTTP forwarding
 - **SOCKS5** -- SOCKS5 with optional authentication
-- **TUN** -- User-space TCP/IP stack via netstack-smoltcp
+- **Transparent Proxy (TProxy)** -- Kernel-level traffic interception via nftables (Linux) or pf (macOS)
+
+### Transparent Proxy
+Intercept all local TCP traffic at the kernel firewall level without per-app proxy configuration.
+
+- **nftables** redirect on Linux, **pf** anchor on macOS
+- **Loop avoidance**: SO_MARK on outbound DIRECT sockets (Linux), UID-based bypass (macOS), plus IP bypass for upstream proxy servers
+- **SNI extraction**: Peek at TLS ClientHello to recover hostname for HTTPS traffic
+- **DNS snooping**: Reverse IP→domain lookup from recent DNS queries for non-TLS traffic
+- **RAII firewall guard**: Rules automatically cleaned up on shutdown (SIGINT/SIGTERM)
+- Configurable via `tproxy-port`, `routing-mark`, and `tproxy-sni` in YAML
 
 ### Web Dashboard
 
@@ -92,10 +103,10 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 ## Architecture
 
 ```
-Listeners (HTTP/SOCKS5/Mixed/TUN)
+Listeners (HTTP/SOCKS5/Mixed/TProxy)
         |
         v
-    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal)
+    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal/Snooping)
         |
     Rule Matching Engine
         |
@@ -113,9 +124,9 @@ Listeners (HTTP/SOCKS5/Mixed/TUN)
 | `mihomo-trie` | Domain trie for efficient pattern matching |
 | `mihomo-proxy` | Proxy protocol implementations and groups |
 | `mihomo-rules` | Rule matching engine and parser |
-| `mihomo-dns` | DNS resolver, FakeIP pool, cache, server |
+| `mihomo-dns` | DNS resolver, FakeIP pool, cache, DNS snooping, server |
 | `mihomo-tunnel` | Core routing, TCP/UDP relay, statistics |
-| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TUN) |
+| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
 | `mihomo-config` | YAML configuration parsing, subscription fetcher, config persistence |
 | `mihomo-api` | REST API (Axum) + embedded web UI |
 | `mihomo-app` | CLI entry point |
@@ -209,6 +220,11 @@ mixed-port: 7890
 mode: rule
 log-level: info
 
+# Transparent proxy (requires root/sudo)
+# tproxy-port: 7893
+# tproxy-sni: true
+# routing-mark: 9527
+
 external-controller: 127.0.0.1:9090
 
 dns:
@@ -278,6 +294,9 @@ cargo test --test trojan_integration
 # Shadowsocks integration tests (requires ssserver)
 cargo install shadowsocks-rust --features "stream-cipher aead-cipher-2022" --locked
 cargo test --test shadowsocks_integration
+
+# Transparent proxy end-to-end tests (requires Docker)
+bash tests/test_tproxy_qemu.sh
 ```
 
 ## License

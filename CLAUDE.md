@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), DNS with FakeIP, and a REST API for runtime control. Licensed under GPL-3.0.
+Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), transparent proxy (nftables/pf), DNS with FakeIP and snooping, and a REST API for runtime control. Licensed under GPL-3.0.
 
 ## Build Commands
 
@@ -25,6 +25,7 @@ cargo test --lib
 cargo test --test rules_test           # 78 rule matching tests
 cargo test --test trojan_integration   # embedded mock server, no external deps
 cargo test --test shadowsocks_integration  # requires ssserver (see below)
+bash tests/test_tproxy_qemu.sh             # Docker-based tproxy e2e tests
 
 # Install ssserver for SS integration tests
 cargo install shadowsocks-rust --features "stream-cipher aead-cipher-2022" --locked
@@ -39,10 +40,10 @@ cargo clippy --all-targets
 ## Architecture
 
 ```
-Listeners (HTTP/SOCKS5/Mixed)
+Listeners (HTTP/SOCKS5/Mixed/TProxy)
         |
         v
-    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal)
+    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal/Snooping)
         |
     Rule Matching Engine
         |
@@ -60,16 +61,16 @@ Listeners (HTTP/SOCKS5/Mixed)
 | `mihomo-trie` | Domain trie for efficient pattern matching |
 | `mihomo-proxy` | Proxy protocol implementations (SS, Trojan, Direct, Reject) and groups (Selector, URLTest, Fallback) |
 | `mihomo-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
-| `mihomo-dns` | DNS resolver, FakeIP pool, cache, UDP server |
+| `mihomo-dns` | DNS resolver, FakeIP pool, cache, DNS snooping (IP→domain reverse table), UDP server |
 | `mihomo-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
-| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5) |
+| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
 | `mihomo-config` | YAML configuration parsing into typed structs |
 | `mihomo-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
 | `mihomo-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API |
 
 ### Startup Flow
 
-`mihomo-app/src/main.rs` → parse CLI args → `mihomo_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP) as tokio tasks → await ctrl-c.
+`mihomo-app/src/main.rs` → parse CLI args → `mihomo_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP/TProxy) as tokio tasks → await SIGINT/SIGTERM.
 
 ### Key Patterns
 

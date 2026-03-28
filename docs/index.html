@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mihomo-rust - A High-Performance Proxy Kernel in Rust</title>
-<meta name="description" content="Rule-based tunneling proxy with Shadowsocks, Trojan, DNS FakeIP, TUN mode, web dashboard, and subscription management. Written in Rust.">
+<meta name="description" content="Rule-based tunneling proxy with Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management. Written in Rust.">
 <style>
 :root {
   --bg: #0a0f1a;
@@ -92,7 +92,7 @@ footer a { color: var(--accent); }
 <section class="hero">
   <div class="container">
     <h1><span>mihomo-rust</span></h1>
-    <p>A high-performance rule-based tunneling proxy kernel written in Rust. Shadowsocks, Trojan, DNS FakeIP, TUN mode, web dashboard, and subscription management.</p>
+    <p>A high-performance rule-based tunneling proxy kernel written in Rust. Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management.</p>
     <div class="hero-buttons">
       <a href="https://github.com/madeye/mihomo-rust" class="btn btn-primary">View on GitHub</a>
       <a href="https://github.com/madeye/mihomo-rust/releases/latest" class="btn btn-secondary">Download</a>
@@ -128,12 +128,12 @@ footer a { color: var(--accent); }
         <p>Import Clash YAML subscriptions with proxies, groups, and rules. Auto-cached to disk for instant startup. Background refresh on intervals.</p>
       </div>
       <div class="card">
-        <h3><span class="icon">&#x1F50D;</span> DNS with FakeIP</h3>
-        <p>Built-in UDP DNS server with main + fallback nameservers, FakeIP transparent proxying, response caching, and request deduplication.</p>
+        <h3><span class="icon">&#x1F50D;</span> DNS &amp; Snooping</h3>
+        <p>Built-in UDP DNS server with main + fallback nameservers, FakeIP mode, response caching, and IP&#x2192;domain reverse lookup table for transparent proxy hostname recovery.</p>
       </div>
       <div class="card">
-        <h3><span class="icon">&#x1F6E1;</span> TUN Mode</h3>
-        <p>User-space TCP/IP stack via netstack-smoltcp for system-wide transparent proxying. DNS hijack support for seamless integration.</p>
+        <h3><span class="icon">&#x1F6E1;</span> Transparent Proxy</h3>
+        <p>Kernel-level traffic interception via nftables (Linux) or pf (macOS). SNI extraction for HTTPS, DNS snooping for HTTP. SO_MARK loop avoidance. Auto firewall teardown.</p>
       </div>
       <div class="card">
         <h3><span class="icon">&#x2699;</span> Proxy Groups</h3>
@@ -166,10 +166,10 @@ footer a { color: var(--accent); }
 <section class="arch">
   <div class="container">
     <h2>Architecture</h2>
-    <div class="arch-diagram"><span class="hl">Listeners</span> (HTTP / SOCKS5 / Mixed / TUN)
+    <div class="arch-diagram"><span class="hl">Listeners</span> (HTTP / SOCKS5 / Mixed / TProxy)
         |
         v
-    <span class="hl">Tunnel</span> (routing engine)  &lt;--&gt;  <span class="hl2">DNS Resolver</span> (FakeIP / Normal)
+    <span class="hl">Tunnel</span> (routing engine)  &lt;--&gt;  <span class="hl2">DNS Resolver</span> (FakeIP / Normal / Snooping)
         |
     <span class="hl">Rule Matching Engine</span>
         |
@@ -190,9 +190,9 @@ footer a { color: var(--accent); }
         <tr><td>mihomo-trie</td><td>Domain trie for efficient pattern matching</td></tr>
         <tr><td>mihomo-proxy</td><td>Proxy protocol implementations and groups</td></tr>
         <tr><td>mihomo-rules</td><td>Rule matching engine and parser</td></tr>
-        <tr><td>mihomo-dns</td><td>DNS resolver, FakeIP pool, cache, server</td></tr>
+        <tr><td>mihomo-dns</td><td>DNS resolver, FakeIP pool, cache, DNS snooping, server</td></tr>
         <tr><td>mihomo-tunnel</td><td>Core routing, TCP/UDP relay, statistics</td></tr>
-        <tr><td>mihomo-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TUN)</td></tr>
+        <tr><td>mihomo-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TProxy)</td></tr>
         <tr><td>mihomo-config</td><td>YAML config parsing, subscription fetcher, persistence</td></tr>
         <tr><td>mihomo-api</td><td>REST API (Axum) + embedded web dashboard</td></tr>
         <tr><td>mihomo-app</td><td>CLI entry point</td></tr>
