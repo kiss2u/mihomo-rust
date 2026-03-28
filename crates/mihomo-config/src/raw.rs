@@ -19,6 +19,9 @@ pub struct RawConfig {
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
     pub rules: Option<Vec<String>>,
     pub subscriptions: Option<Vec<RawSubscription>>,
+    pub tproxy_port: Option<u16>,
+    pub tproxy_sni: Option<bool>,
+    pub routing_mark: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

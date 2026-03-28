@@ -156,6 +156,12 @@ impl Resolver {
         self.fakeip_pool.as_ref()?.lookup_ip(ip)
     }
 
+    /// Reverse lookup via DNS snooping: given a real IP, return the domain
+    /// that was recently resolved to it (from the DNS cache).
+    pub fn reverse_lookup(&self, ip: IpAddr) -> Option<String> {
+        self.cache.reverse_lookup(ip)
+    }
+
     /// Check if an IP is a fake IP
     pub fn is_fake_ip(&self, ip: IpAddr) -> bool {
         self.fakeip_pool

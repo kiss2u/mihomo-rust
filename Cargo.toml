@@ -82,6 +82,9 @@ regex = "1"
 # Byte manipulation
 bytes = "1"
 
+# Socket utilities
+socket2 = { version = "0.5", features = ["all"] }
+
 # Futures
 futures = "0.3"
 

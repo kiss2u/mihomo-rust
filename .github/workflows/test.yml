@@ -87,3 +87,12 @@ jobs:
 
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
+
+  tproxy:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TProxy integration tests
+        run: bash tests/test_tproxy_qemu.sh

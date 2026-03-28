@@ -129,6 +129,110 @@ fn test_cache_zero_capacity_uses_default() {
     assert!(cache.get("test.com").is_some());
 }
 
+// ── Reverse lookup (DNS snooping) tests ─────────────────────────────────
+
+#[test]
+fn test_reverse_lookup_basic() {
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+    cache.put("example.com", vec![ip], Duration::from_secs(300));
+
+    assert_eq!(cache.reverse_lookup(ip), Some("example.com".to_string()));
+}
+
+#[test]
+fn test_reverse_lookup_miss() {
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+    assert!(cache.reverse_lookup(ip).is_none());
+}
+
+#[test]
+fn test_reverse_lookup_multiple_ips() {
+    let cache = DnsCache::new(100);
+    let ip1 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+    let ip2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+    cache.put("cloudflare.com", vec![ip1, ip2], Duration::from_secs(300));
+
+    assert_eq!(
+        cache.reverse_lookup(ip1),
+        Some("cloudflare.com".to_string())
+    );
+    assert_eq!(
+        cache.reverse_lookup(ip2),
+        Some("cloudflare.com".to_string())
+    );
+}
+
+#[test]
+fn test_reverse_lookup_ipv6() {
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111));
+    cache.put("one.one.one.one", vec![ip], Duration::from_secs(300));
+
+    assert_eq!(
+        cache.reverse_lookup(ip),
+        Some("one.one.one.one".to_string())
+    );
+}
+
+#[test]
+fn test_reverse_lookup_overwrite_same_ip() {
+    // When two domains resolve to the same IP, last write wins
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+
+    cache.put("old.example.com", vec![ip], Duration::from_secs(300));
+    cache.put("new.example.com", vec![ip], Duration::from_secs(300));
+
+    assert_eq!(
+        cache.reverse_lookup(ip),
+        Some("new.example.com".to_string())
+    );
+}
+
+#[test]
+fn test_reverse_lookup_expiry() {
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+
+    cache.put("expired.com", vec![ip], Duration::from_secs(0));
+    std::thread::sleep(Duration::from_millis(10));
+
+    assert!(cache.reverse_lookup(ip).is_none());
+}
+
+#[test]
+fn test_reverse_lookup_clear() {
+    let cache = DnsCache::new(100);
+    let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+    cache.put("example.com", vec![ip], Duration::from_secs(300));
+
+    assert!(cache.reverse_lookup(ip).is_some());
+    cache.clear();
+    assert!(cache.reverse_lookup(ip).is_none());
+}
+
+#[test]
+fn test_reverse_lookup_independent_of_forward_eviction() {
+    // Forward cache has capacity 2, but reverse map uses DashMap (unbounded)
+    let cache = DnsCache::new(2);
+    let ip1 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+    let ip2 = IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2));
+    let ip3 = IpAddr::V4(Ipv4Addr::new(3, 3, 3, 3));
+
+    cache.put("first.com", vec![ip1], Duration::from_secs(300));
+    cache.put("second.com", vec![ip2], Duration::from_secs(300));
+    cache.put("third.com", vec![ip3], Duration::from_secs(300));
+
+    // Forward cache evicted first.com
+    assert!(cache.get("first.com").is_none());
+    // But reverse map still has the mapping
+    assert_eq!(cache.reverse_lookup(ip1), Some("first.com".to_string()));
+    assert_eq!(cache.reverse_lookup(ip2), Some("second.com".to_string()));
+    assert_eq!(cache.reverse_lookup(ip3), Some("third.com".to_string()));
+}
+
 #[test]
 fn test_cache_different_domains_independent() {
     let cache = DnsCache::new(100);

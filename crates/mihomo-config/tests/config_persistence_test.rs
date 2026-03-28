@@ -23,6 +23,9 @@ fn minimal_raw_config() -> RawConfig {
             "MATCH,REJECT".into(),
         ]),
         subscriptions: None,
+        tproxy_port: None,
+        tproxy_sni: None,
+        routing_mark: None,
     }
 }
 
@@ -194,6 +197,9 @@ fn rebuild_from_raw_empty_config() {
         proxy_groups: None,
         rules: None,
         subscriptions: None,
+        tproxy_port: None,
+        tproxy_sni: None,
+        routing_mark: None,
     };
     let (proxies, rules) = rebuild_from_raw(&raw).unwrap();
     // Should still have built-in proxies

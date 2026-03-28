@@ -39,6 +39,9 @@ pub struct ListenerConfig {
     pub socks_port: Option<u16>,
     pub http_port: Option<u16>,
     pub bind_address: String,
+    pub tproxy_port: Option<u16>,
+    pub tproxy_sni: bool,
+    pub routing_mark: Option<u32>,
 }
 
 pub struct ApiConfig {
@@ -78,11 +81,14 @@ pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
+    let direct = if let Some(mark) = raw.routing_mark {
+        mihomo_proxy::DirectAdapter::with_routing_mark(mark)
+    } else {
+        mihomo_proxy::DirectAdapter::new()
+    };
     proxies.insert(
         "DIRECT".to_string(),
-        Arc::new(proxy_parser::WrappedProxy::new(Box::new(
-            mihomo_proxy::DirectAdapter::new(),
-        ))),
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(direct))),
     );
     proxies.insert(
         "REJECT".to_string(),
@@ -183,6 +189,9 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
         socks_port: raw.socks_port,
         http_port: raw.port,
         bind_address: bind_addr,
+        tproxy_port: raw.tproxy_port,
+        tproxy_sni: raw.tproxy_sni.unwrap_or(true),
+        routing_mark: raw.routing_mark,
     };
 
     // API config

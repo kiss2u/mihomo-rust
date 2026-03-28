@@ -22,6 +22,9 @@ fn minimal_raw_config() -> RawConfig {
             "MATCH,REJECT".into(),
         ]),
         subscriptions: None,
+        tproxy_port: None,
+        tproxy_sni: None,
+        routing_mark: None,
     }
 }
 

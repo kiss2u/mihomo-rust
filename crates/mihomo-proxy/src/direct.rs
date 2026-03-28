@@ -5,11 +5,21 @@ use mihomo_common::{
 use std::net::SocketAddr;
 use tokio::net::{TcpStream, UdpSocket};
 
-pub struct DirectAdapter;
+pub struct DirectAdapter {
+    routing_mark: Option<u32>,
+}
 
 impl DirectAdapter {
     pub fn new() -> Self {
-        Self
+        Self {
+            routing_mark: None,
+        }
+    }
+
+    pub fn with_routing_mark(routing_mark: u32) -> Self {
+        Self {
+            routing_mark: Some(routing_mark),
+        }
     }
 }
 
@@ -81,6 +91,48 @@ impl ProxyPacketConn for DirectPacketConn {
     }
 }
 
+/// Create a TCP socket with an optional routing mark (SO_MARK on Linux)
+/// set BEFORE connecting, so the SYN packet is already marked.
+async fn connect_with_mark(
+    addr: &str,
+    routing_mark: Option<u32>,
+) -> std::io::Result<TcpStream> {
+    #[cfg(target_os = "linux")]
+    if let Some(mark) = routing_mark {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::ToSocketAddrs;
+
+        let dest: SocketAddr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::other("could not resolve address"))?;
+
+        let domain = if dest.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        socket.set_mark(mark)?;
+        socket.set_nonblocking(true)?;
+
+        match socket.connect(&dest.into()) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        let std_stream: std::net::TcpStream = socket.into();
+        return TcpStream::from_std(std_stream);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = routing_mark;
+
+    TcpStream::connect(addr).await
+}
+
 #[async_trait]
 impl ProxyAdapter for DirectAdapter {
     fn name(&self) -> &str {
@@ -101,7 +153,9 @@ impl ProxyAdapter for DirectAdapter {
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let addr = metadata.remote_address();
-        let stream = TcpStream::connect(&addr).await.map_err(MihomoError::Io)?;
+        let stream = connect_with_mark(&addr, self.routing_mark)
+            .await
+            .map_err(MihomoError::Io)?;
         Ok(Box::new(DirectConn(stream)))
     }
 

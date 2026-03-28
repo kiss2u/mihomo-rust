@@ -4,7 +4,7 @@ use mihomo_api::ApiServer;
 use mihomo_config::load_config;
 use mihomo_config::raw::RawConfig;
 use mihomo_dns::DnsServer;
-use mihomo_listener::MixedListener;
+use mihomo_listener::{MixedListener, TProxyListener};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -449,10 +449,30 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
         });
     }
 
+    if let Some(port) = config.listeners.tproxy_port {
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+        let listener = TProxyListener::new(
+            tunnel.clone(),
+            addr,
+            config.listeners.tproxy_sni,
+            config.listeners.routing_mark,
+        );
+        tokio::spawn(async move {
+            if let Err(e) = listener.run().await {
+                error!("TProxy listener error: {}", e);
+            }
+        });
+    }
+
     info!("mihomo-rust is running");
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = sigterm.recv() => {},
+    }
     info!("Shutting down...");
 
     Ok(())
