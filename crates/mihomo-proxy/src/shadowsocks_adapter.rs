@@ -1,3 +1,5 @@
+use crate::simple_obfs::{HttpObfs, TlsObfs};
+use crate::v2ray_plugin::{self, V2rayPluginConfig};
 use async_trait::async_trait;
 use mihomo_common::{
     AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
@@ -13,8 +15,6 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tracing::debug;
 
-use crate::simple_obfs::{HttpObfs, TlsObfs};
-
 /// Built-in (native, no external process) simple-obfs configuration.
 #[derive(Debug, Clone)]
 pub enum BuiltinObfs {
@@ -22,6 +22,26 @@ pub enum BuiltinObfs {
     Http { host: String },
     /// TLS simple-obfs with the configured fake SNI server name.
     Tls { server: String },
+}
+
+/// Which plugin (if any) the adapter uses when dialing outbound.
+///
+/// Layered on top of the SS cipher stream:
+/// * `None` — direct TCP to `server:port`.
+/// * `External` — SIP003 subprocess (e.g. `obfs-local` via shadowsocks-rust's
+///   `Plugin::start`); `server_config` is rewritten to point at the local
+///   listener the subprocess exposes.
+/// * `Obfs` — native simple-obfs codec wraps the TCP stream before SS encryption.
+/// * `V2ray` — native v2ray-plugin websocket (+ optional TLS) transport wraps
+///   the TCP stream before SS encryption.
+#[allow(clippy::large_enum_variant)]
+enum PluginKind {
+    None,
+    /// External SIP003 plugin subprocess. The `Plugin` handle keeps the
+    /// subprocess alive for the adapter's lifetime.
+    External(#[allow(dead_code)] Plugin),
+    Obfs(BuiltinObfs),
+    V2ray(V2rayPluginConfig),
 }
 
 pub struct ShadowsocksAdapter {
@@ -32,8 +52,7 @@ pub struct ShadowsocksAdapter {
     context: shadowsocks::context::SharedContext,
     addr_str: String,
     support_udp: bool,
-    builtin_obfs: Option<BuiltinObfs>,
-    _plugin: Option<Plugin>,
+    plugin: PluginKind,
 }
 
 impl ShadowsocksAdapter {
@@ -56,14 +75,24 @@ impl ShadowsocksAdapter {
         let context = Context::new_shared(ServerType::Local);
         let addr_str = format!("{}:{}", server, port);
 
-        // Native simple-obfs handled in dial_tcp; never spawn an external process for it.
-        let builtin_obfs = match plugin_name {
-            Some(p) if is_builtin_obfs_plugin(p) => Some(parse_obfs_opts(plugin_opts, server)?),
-            _ => None,
-        };
-
-        let plugin = if builtin_obfs.is_none() {
-            if let Some(pname) = plugin_name {
+        let plugin = match plugin_name {
+            Some(p) if is_builtin_obfs_plugin(p) => {
+                let cfg = parse_obfs_opts(plugin_opts, server)?;
+                debug!("SS '{}' using built-in simple-obfs ({:?})", name, cfg);
+                PluginKind::Obfs(cfg)
+            }
+            Some("v2ray-plugin") => {
+                let mut cfg = v2ray_plugin::parse_opts(plugin_opts.unwrap_or(""))?;
+                if cfg.host.is_empty() {
+                    cfg.host = server.to_string();
+                }
+                debug!(
+                    "SS '{}' using built-in v2ray-plugin: tls={} host={} path={} mux={}",
+                    name, cfg.tls, cfg.host, cfg.path, cfg.mux
+                );
+                PluginKind::V2ray(cfg)
+            }
+            Some(pname) => {
                 let plugin_config = PluginConfig {
                     plugin: pname.to_string(),
                     plugin_opts: plugin_opts.map(String::from),
@@ -81,16 +110,9 @@ impl ShadowsocksAdapter {
                 server_config.set_plugin_addr(ServerAddr::SocketAddr(started.local_addr()));
                 server_config.set_plugin(plugin_config);
                 debug!("SS plugin '{}' started on {}", pname, started.local_addr());
-                Some(started)
-            } else {
-                None
+                PluginKind::External(started)
             }
-        } else {
-            debug!(
-                "SS '{}' using built-in simple-obfs ({:?})",
-                name, builtin_obfs
-            );
-            None
+            None => PluginKind::None,
         };
 
         Ok(Self {
@@ -101,8 +123,7 @@ impl ShadowsocksAdapter {
             context,
             addr_str,
             support_udp: udp,
-            builtin_obfs,
-            _plugin: plugin,
+            plugin,
         })
     }
 }
@@ -287,45 +308,63 @@ impl ProxyAdapter for ShadowsocksAdapter {
         let addr = parse_address(metadata);
         debug!("SS connecting to {} via {}", addr, self.addr_str);
 
-        if let Some(obfs) = &self.builtin_obfs {
-            // Open a raw TCP connection to the SS server, wrap it in the
-            // simple-obfs codec, then layer the SS crypto stream on top.
-            let tcp = TcpStream::connect((self.server.as_str(), self.port))
-                .await
-                .map_err(|e| MihomoError::Proxy(format!("ss obfs tcp connect: {}", e)))?;
-            let _ = tcp.set_nodelay(true);
-            match obfs.clone() {
-                BuiltinObfs::Http { host } => {
-                    let wrapped = HttpObfs::new(tcp, host, self.port);
-                    let stream = ProxyClientStream::from_stream(
-                        self.context.clone(),
-                        wrapped,
-                        &self.server_config,
-                        addr,
-                    );
-                    Ok(Box::new(SsConn(stream)))
-                }
-                BuiltinObfs::Tls { server } => {
-                    let wrapped = TlsObfs::new(tcp, server);
-                    let stream = ProxyClientStream::from_stream(
-                        self.context.clone(),
-                        wrapped,
-                        &self.server_config,
-                        addr,
-                    );
-                    Ok(Box::new(SsConn(stream)))
+        match &self.plugin {
+            PluginKind::Obfs(obfs) => {
+                // Open a raw TCP connection to the SS server, wrap it in the
+                // simple-obfs codec, then layer the SS crypto stream on top.
+                let tcp = TcpStream::connect((self.server.as_str(), self.port))
+                    .await
+                    .map_err(|e| MihomoError::Proxy(format!("ss obfs tcp connect: {}", e)))?;
+                let _ = tcp.set_nodelay(true);
+                match obfs.clone() {
+                    BuiltinObfs::Http { host } => {
+                        let wrapped = HttpObfs::new(tcp, host, self.port);
+                        let stream = ProxyClientStream::from_stream(
+                            self.context.clone(),
+                            wrapped,
+                            &self.server_config,
+                            addr,
+                        );
+                        Ok(Box::new(SsConn(stream)))
+                    }
+                    BuiltinObfs::Tls { server } => {
+                        let wrapped = TlsObfs::new(tcp, server);
+                        let stream = ProxyClientStream::from_stream(
+                            self.context.clone(),
+                            wrapped,
+                            &self.server_config,
+                            addr,
+                        );
+                        Ok(Box::new(SsConn(stream)))
+                    }
                 }
             }
-        } else {
-            let stream =
-                ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
-                    .await
-                    .map_err(|e| MihomoError::Proxy(format!("ss connect: {}", e)))?;
-            Ok(Box::new(SsConn(stream)))
+            PluginKind::V2ray(cfg) => {
+                let transport = v2ray_plugin::dial(cfg, &self.server, self.port).await?;
+                let stream = ProxyClientStream::from_stream(
+                    self.context.clone(),
+                    transport,
+                    &self.server_config,
+                    addr,
+                );
+                Ok(Box::new(SsConn(stream)))
+            }
+            PluginKind::None | PluginKind::External(_) => {
+                let stream =
+                    ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
+                        .await
+                        .map_err(|e| MihomoError::Proxy(format!("ss connect: {}", e)))?;
+                Ok(Box::new(SsConn(stream)))
+            }
         }
     }
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
+        if matches!(self.plugin, PluginKind::V2ray(_)) {
+            return Err(MihomoError::NotSupported(
+                "v2ray-plugin does not support UDP relay".into(),
+            ));
+        }
         let socket = ProxySocket::connect(self.context.clone(), &self.server_config)
             .await
             .map_err(|e| MihomoError::Proxy(format!("ss udp connect: {}", e)))?;

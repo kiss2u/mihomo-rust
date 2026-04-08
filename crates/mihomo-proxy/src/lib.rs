@@ -5,6 +5,7 @@ pub mod reject;
 pub mod shadowsocks_adapter;
 pub mod simple_obfs;
 pub mod trojan;
+pub mod v2ray_plugin;
 
 pub use direct::DirectAdapter;
 pub use group::fallback::FallbackGroup;

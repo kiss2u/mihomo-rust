@@ -27,6 +27,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 socket2 = { workspace = true }
 libc = "0.2"
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -35,3 +38,4 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+tempfile = { workspace = true }
