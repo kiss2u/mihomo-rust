@@ -15,7 +15,6 @@ use mihomo_rules::process::ProcessRule;
 
 fn helper() -> RuleMatchHelper {
     RuleMatchHelper {
-        resolve_ip: Box::new(|| {}),
         find_process: Box::new(|| {}),
     }
 }
@@ -709,4 +708,12 @@ fn rule_chain_ip_match() {
     let m4 = meta("random.site.com", 8080);
     let r4 = rules.iter().find(|r| r.match_metadata(&m4, &h)).unwrap();
     assert_eq!(r4.adapter(), "DIRECT");
+}
+
+#[test]
+fn and_rule_should_resolve_ip_recurses_into_children() {
+    use mihomo_rules::ipcidr::IpCidrRule;
+    let inner = IpCidrRule::new("1.2.3.0/24", "PROXY", false, false).unwrap();
+    let and = AndRule::new(vec![Box::new(inner)], "PROXY");
+    assert!(and.should_resolve_ip());
 }

@@ -1,11 +1,12 @@
 use crate::match_engine;
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
-use mihomo_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
+use mihomo_common::{DnsMode, Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
 use mihomo_dns::Resolver;
 use mihomo_proxy::DirectAdapter;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -16,9 +17,52 @@ pub struct TunnelInner {
     pub resolver: Arc<Resolver>,
     pub nat_table: NatTable,
     pub stats: Arc<Statistics>,
+    /// Cached: true if any rule needs the dst_ip resolved (GeoIP / IP-CIDR).
+    /// Recomputed by `Tunnel::update_rules`.
+    pub needs_ip_resolution: AtomicBool,
 }
 
 impl TunnelInner {
+    /// Pre-process metadata before rule matching:
+    /// 1. Reverse FakeIP back to the original host (so domain rules see the host).
+    /// 2. If any rule needs IP resolution and we don't yet have a real IP,
+    ///    resolve `metadata.host` via the internal resolver and populate `dst_ip`.
+    ///
+    /// `Metadata::remote_address()` prefers `host` over `dst_ip`, so overwriting
+    /// `dst_ip` here does not change which destination the proxy adapter dials.
+    pub async fn pre_resolve(&self, metadata: &mut Metadata) {
+        // Step 1: FakeIP reverse
+        if let Some(dst_ip) = metadata.dst_ip {
+            if self.resolver.is_fake_ip(dst_ip) {
+                if let Some(host) = self.resolver.fake_ip_reverse(dst_ip) {
+                    metadata.host = host;
+                    metadata.dns_mode = DnsMode::FakeIp;
+                }
+            }
+        }
+
+        // Step 2: Resolve host -> real IP for rule matching
+        if !self.needs_ip_resolution.load(Ordering::Relaxed) {
+            return;
+        }
+        if metadata.host.is_empty() {
+            return;
+        }
+        // Step 1 populated `metadata.host` but left `dst_ip` as the (still-fake)
+        // address. Detect that here and replace it with the real routable IP.
+        let needs_resolve = match metadata.dst_ip {
+            None => true,
+            Some(ip) => self.resolver.is_fake_ip(ip),
+        };
+        if !needs_resolve {
+            return;
+        }
+        if let Some(real_ip) = self.resolver.resolve_ip_real(&metadata.host).await {
+            debug!("pre_resolve: {} -> {}", metadata.host, real_ip);
+            metadata.dst_ip = Some(real_ip);
+        }
+    }
+
     /// Resolve which proxy to use for the given metadata
     pub fn resolve_proxy(
         &self,
@@ -49,7 +93,7 @@ impl TunnelInner {
             }
             TunnelMode::Rule => {
                 let rules = self.rules.read();
-                let result = match_engine::match_rules(metadata, &rules, &self.resolver);
+                let result = match_engine::match_rules(metadata, &rules);
                 match result {
                     Some(m) => {
                         let proxies = self.proxies.read();
@@ -91,6 +135,7 @@ impl Tunnel {
                 resolver,
                 nat_table: udp::new_nat_table(),
                 stats: Arc::new(Statistics::new()),
+                needs_ip_resolution: AtomicBool::new(false),
             }),
         }
     }
@@ -109,8 +154,17 @@ impl Tunnel {
     }
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
-        *self.inner.rules.write() = rules;
-        info!("Rules updated");
+        let needs = rules.iter().any(|r| r.should_resolve_ip());
+        {
+            let mut guard = self.inner.rules.write();
+            *guard = rules;
+            // Store under the write lock so any reader that acquires the rules
+            // lock after this point also sees the updated flag.
+            self.inner
+                .needs_ip_resolution
+                .store(needs, Ordering::Relaxed);
+        }
+        info!("Rules updated (needs_ip_resolution={})", needs);
     }
 
     pub fn update_proxies(&self, proxies: HashMap<String, Arc<dyn Proxy>>) {
