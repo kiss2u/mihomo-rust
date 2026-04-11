@@ -106,19 +106,19 @@ YAML schema, struct shapes, error types, and per-layer tests.
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| M1.C-1 | `load-balance` group (round-robin + consistent-hash strategies) | H | L | `docs/specs/group-load-balance.md` *(todo)* | engineer |
-| M1.C-2 | `relay` group (chain multiple outbounds) | M | M | `docs/specs/group-relay.md` *(todo)* | engineer |
+| M1.C-1 | `load-balance` group (round-robin + consistent-hash strategies) | H | L | [`docs/specs/group-load-balance.md`](specs/group-load-balance.md) *(draft)* | engineer |
+| M1.C-2 | `relay` group (chain multiple outbounds) | M | M | [`docs/specs/group-relay.md`](specs/group-relay.md) *(draft)* | engineer |
 
 ### M1.D — Rules & providers
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| M1.D-1 | Finish parser for already-enum'd rule types: `IN-PORT`, `DSCP`, `UID`, `SRC-GEOIP`, `PROCESS-PATH` | M | L | `docs/specs/rules-parser-completion.md` *(todo)* | engineer |
+| M1.D-1 | Finish parser for already-enum'd rule types: `IN-PORT`, `DSCP`, `UID`, `SRC-GEOIP`, `PROCESS-PATH` | M | L | [`docs/specs/rules-parser-completion.md`](specs/rules-parser-completion.md) *(draft)* | engineer |
 | M1.D-2 | `GEOSITE` rule + geosite DB loader (**`mrs` only**, per architect 2026-04-11) | H | M | `docs/specs/rule-geosite.md` *(todo)* | engineer |
-| M1.D-3 | `IP-SUFFIX`, `IP-ASN` (requires ASN MMDB) | M | M | bundle with M1.D-1 | engineer |
+| M1.D-3 | `IP-SUFFIX`, `IP-ASN` (requires ASN MMDB) | M | M | bundled into M1.D-1 spec | engineer |
 | M1.D-4 | `IN-TYPE`, `IN-NAME`, `IN-USER` (depends on named listeners — see M1.F) | M | M | defer until M1.F-1 | engineer |
 | M1.D-5 | Rule provider `inline` type, `mrs` binary format, periodic `interval` refresh | M | M | `docs/specs/rule-provider-upgrade.md` *(todo)* — supersedes M0-9 if taken together | engineer |
-| M1.D-6 | `DOMAIN-WILDCARD` | L | L | trivial, fold into M1.D-1 | engineer |
+| M1.D-6 | `DOMAIN-WILDCARD` | L | L | bundled into M1.D-1 spec | engineer |
 | M1.D-7 | `SUB-RULE` (named rule subsets) | M | M | `docs/specs/sub-rules.md` *(todo)* | engineer |
 
 ### M1.E — DNS

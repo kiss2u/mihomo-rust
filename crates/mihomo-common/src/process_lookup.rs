@@ -48,7 +48,7 @@ mod platform {
         }
         let (inode, uid) = inode_uid?;
         trace!(inode, uid, "process_lookup: matched /proc/net entry");
-        let (pid, name, exe) = find_pid_by_inode(inode)?;
+        let (_pid, name, exe) = find_pid_by_inode(inode)?;
         Some(ProcessInfo {
             name,
             path: exe,
