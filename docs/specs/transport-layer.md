@@ -186,7 +186,11 @@ Notes:
   with a `warn!` and clamps to 2048 if the user sets higher. Do not
   silently accept 65535.
 - `host_header` takes precedence over `extra_headers` with key `Host`,
-  but if both are set we log a `warn!` once and prefer `host_header`.
+  but if both are set we log a `warn!` once. The warn fires at
+  `WsLayer::new()` time (not per-connect) — the conflict is
+  detectable at construction and warning at that boundary avoids
+  per-connection log spam on the hot path. (Amended 2026-04-11 during
+  M1.A-2 review.)
 - The Sec-WebSocket-Protocol early-data encoding matches upstream
   `transport/vmess/websocket.go` — base64url of the first N bytes, no
   padding, capped at `max_early_data`.

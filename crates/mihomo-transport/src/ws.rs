@@ -82,10 +82,42 @@ pub struct WsLayer {
 impl WsLayer {
     /// Create a `WsLayer` from the given configuration.
     ///
+    /// Returns `Err` if:
+    /// - `host_header` is `None` — normalization (fallback to the proxy's
+    ///   `server:` address) is the caller's responsibility; `mihomo-transport`
+    ///   does not infer values from context it cannot see (ADR-0001 §1).
+    /// - any key/value in `extra_headers` is not a valid HTTP header name/value —
+    ///   caught here at construction time so the error surfaces as a config
+    ///   error rather than a panic mid-connection.
+    ///
     /// Logs a `warn!` if both `host_header` and a `Host` entry in
     /// `extra_headers` are set — the conflict is detectable at construction
     /// time and warning once here avoids per-connection spam.
-    pub fn new(config: WsConfig) -> Self {
+    pub fn new(config: WsConfig) -> Result<Self> {
+        // F1: require host_header (ADR-0001 §1 — transport never infers values).
+        if config.host_header.is_none() {
+            return Err(TransportError::Config(
+                "ws: host_header must be set; \
+                 fall back to the proxy server address in the config layer"
+                    .into(),
+            ));
+        }
+
+        // F2: validate extra_headers at construction time via a dry-run.
+        // build_request can fail on InvalidHeaderName / InvalidHeaderValue;
+        // catching it here makes WsLayer::new a total validator — if it
+        // returns Ok, begin_upgrade cannot fail on header construction.
+        build_request(
+            "ws://localhost/",
+            "localhost",
+            &config.extra_headers,
+            "",
+            "",
+        )
+        .map_err(|e| {
+            TransportError::Config(format!("ws: invalid header in extra_headers: {}", e))
+        })?;
+
         let host_in_extra = config
             .extra_headers
             .iter()
@@ -96,18 +128,19 @@ impl WsLayer {
                  host_header wins (extra Host entry dropped)"
             );
         }
-        Self { config }
+        Ok(Self { config })
     }
 }
 
 #[async_trait]
 impl Transport for WsLayer {
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
+        // Invariant: host_header is Some — enforced by WsLayer::new.
         let host = self
             .config
             .host_header
             .as_deref()
-            .unwrap_or("localhost")
+            .expect("host_header validated at WsLayer::new")
             .to_owned();
         let uri = format!("ws://{}{}", host, self.config.path);
 
@@ -360,8 +393,15 @@ impl AsyncRead for WsStream {
                             // loop to drain
                         }
                         Some(Ok(Message::Ping(payload))) => {
-                            // Best-effort pong.
-                            let _ = Pin::new(&mut state.ws).start_send(Message::Pong(payload));
+                            // Best-effort pong: only attempt when the sink is
+                            // immediately ready.  Per the Sink contract,
+                            // start_send must not be called unless poll_ready
+                            // returned Ready(Ok(())).  Dropping a pong when
+                            // the queue is briefly full is acceptable for an
+                            // optional keepalive; blocking the read path is not.
+                            if let Poll::Ready(Ok(())) = Pin::new(&mut state.ws).poll_ready(cx) {
+                                let _ = Pin::new(&mut state.ws).start_send(Message::Pong(payload));
+                            }
                         }
                         Some(Ok(Message::Pong(_))) => { /* ignore */ }
                         Some(Ok(Message::Close(_))) => {

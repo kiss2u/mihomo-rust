@@ -172,7 +172,7 @@ pub async fn dial(
         extra_headers,
         ..WsConfig::default()
     };
-    let ws_layer = WsLayer::new(ws_config);
+    let ws_layer = WsLayer::new(ws_config).map_err(transport_to_proxy_err)?;
     ws_layer
         .connect(stream)
         .await

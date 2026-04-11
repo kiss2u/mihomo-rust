@@ -4,12 +4,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["vless", "vless-vision"]
+vless = ["mihomo-proxy/vless"]
+vless-vision = ["vless", "mihomo-proxy/vless-vision"]
+
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-rules = { workspace = true }
 mihomo-proxy = { workspace = true }
+mihomo-transport = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }

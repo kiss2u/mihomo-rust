@@ -1543,6 +1543,7 @@ dependencies = [
  "mihomo-dns",
  "mihomo-proxy",
  "mihomo-rules",
+ "mihomo-transport",
  "mihomo-trie",
  "reqwest",
  "serde",
@@ -1624,6 +1625,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tracing",
+ "tracing-subscriber",
  "webpki-roots 0.26.11",
 ]
 

@@ -27,7 +27,7 @@ async fn ws_handshake_upgrade() {
     };
 
     let tcp = TcpStream::connect(addr).await.expect("TCP connect");
-    let layer = WsLayer::new(config);
+    let layer = WsLayer::new(config).expect("WsLayer::new");
     let result = layer.connect(Box::new(tcp)).await;
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
 
@@ -59,6 +59,7 @@ async fn ws_host_header_override() {
 
     let tcp = TcpStream::connect(addr).await.expect("TCP connect");
     WsLayer::new(config)
+        .expect("WsLayer::new")
         .connect(Box::new(tcp))
         .await
         .expect("ws connect");
@@ -92,6 +93,7 @@ async fn ws_early_data_encoded_in_protocol_header() {
 
     let tcp = TcpStream::connect(addr).await.expect("TCP connect");
     let mut stream = WsLayer::new(config)
+        .expect("WsLayer::new")
         .connect(Box::new(tcp))
         .await
         .expect("ws connect returns deferred stream");
@@ -143,7 +145,7 @@ async fn ws_host_conflict_warns() {
 
     // Warn fires synchronously in WsLayer::new().
     let logs = capture_logs(|| {
-        let _ = WsLayer::new(config.clone());
+        WsLayer::new(config.clone()).expect("WsLayer::new with host_header set");
     });
 
     let warn_count = logs.count_containing(&["host_header", "wins"]);
@@ -158,6 +160,7 @@ async fn ws_host_conflict_warns() {
     // Also verify host_header wins at connect time: server gets "winner.example.com".
     let tcp = TcpStream::connect(addr).await.expect("TCP connect");
     WsLayer::new(config)
+        .expect("WsLayer::new")
         .connect(Box::new(tcp))
         .await
         .expect("ws connect");

@@ -5,8 +5,14 @@ pub mod reject;
 pub mod shadowsocks_adapter;
 pub mod simple_obfs;
 pub mod stream_conn;
+pub mod transport_chain;
 pub mod trojan;
 pub mod v2ray_plugin;
+
+#[cfg(feature = "vless")]
+pub(crate) mod vless;
+#[cfg(feature = "vless")]
+pub mod vless_adapter;
 
 pub use direct::DirectAdapter;
 pub use group::fallback::FallbackGroup;
@@ -15,7 +21,11 @@ pub use group::urltest::UrlTestGroup;
 pub use reject::RejectAdapter;
 pub use shadowsocks_adapter::ShadowsocksAdapter;
 pub use stream_conn::StreamConn;
+pub use transport_chain::TransportChain;
 pub use trojan::TrojanAdapter;
+
+#[cfg(feature = "vless")]
+pub use vless_adapter::{VlessAdapter, VlessFlow};
 
 // ─── Error bridge ────────────────────────────────────────────────────────────
 
