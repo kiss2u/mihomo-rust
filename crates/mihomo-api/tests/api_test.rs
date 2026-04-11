@@ -1239,6 +1239,63 @@ async fn auth_gated_write_endpoint_rejects_unauthenticated_post() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// Edge cases: malformed Authorization header values
+#[tokio::test]
+async fn auth_bearer_empty_value_rejects_with_401() {
+    // "Bearer " with nothing after the space: strip_prefix yields "", != secret.
+    let state = test_state_with_secret("hunter2");
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/proxies")
+                .header("authorization", "Bearer ")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_no_space_after_bearer_rejects_with_401() {
+    // "Bearertoken" — neither "Bearer " nor "bearer " prefix present; strip_prefix
+    // returns None so middleware cannot extract a token.
+    let state = test_state_with_secret("hunter2");
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/proxies")
+                .header("authorization", "Bearerhunter2")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_multibyte_utf8_header_value_rejects_with_401() {
+    // "Bearer café" — é is 0xC3 0xA9 (two UTF-8 bytes, not valid ASCII).
+    // HeaderValue::to_str() returns Err for non-ASCII bytes, so the middleware
+    // sees None for the provided token and returns 401.
+    use axum::http::header::HeaderValue;
+    let state = test_state_with_secret("hunter2");
+    let app = create_router(state);
+    let hv = HeaderValue::from_bytes(b"Bearer caf\xc3\xa9").unwrap();
+    let resp = app
+        .oneshot(
+            Request::get("/proxies")
+                .header("authorization", hv)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // ── Delay endpoints (M1.G-2) ─────────────────────────────────────────
 
 mod delay_support {
@@ -1251,6 +1308,7 @@ mod delay_support {
     use std::time::{Duration, Instant};
 
     #[derive(Clone, Debug)]
+    #[allow(dead_code)]
     pub enum DialBehavior {
         InstantOk,
         SleepThenOk(Duration),
@@ -1425,9 +1483,7 @@ mod delay_support {
     /// Build an app state whose tunnel holds exactly the given set of named
     /// proxies. Uses the real `Tunnel` so the delay handlers exercise the
     /// production lookup path.
-    pub fn state_with_proxies(
-        named: Vec<(&str, Arc<dyn Proxy>)>,
-    ) -> Arc<super::AppState> {
+    pub fn state_with_proxies(named: Vec<(&str, Arc<dyn Proxy>)>) -> Arc<super::AppState> {
         use super::*;
         let mut proxies = std::collections::HashMap::new();
         for (name, proxy) in named {
@@ -1457,13 +1513,9 @@ mod delay_support {
 
     /// Build a fallback group that owns the given members. Caller keeps the
     /// member Arcs alive via the returned Vec.
-    pub fn fallback_group(
-        name: &str,
-        members: Vec<Arc<dyn Proxy>>,
-    ) -> Arc<dyn Proxy> {
+    pub fn fallback_group(name: &str, members: Vec<Arc<dyn Proxy>>) -> Arc<dyn Proxy> {
         Arc::new(mihomo_proxy::FallbackGroup::new(name, members))
     }
-
 }
 
 use delay_support::{fallback_group, state_with_proxies, DialBehavior, TestAdapter};
@@ -1473,20 +1525,20 @@ fn url_q() -> &'static str {
 }
 
 async fn delay_req(app: axum::Router, path: String) -> axum::response::Response {
-    app.oneshot(
-        Request::get(path)
-            .body(axum::body::Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap()
+    app.oneshot(Request::get(path).body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap()
 }
 
 // ── A: single-proxy happy path ───────────────────────────────────────
 
 #[tokio::test]
 async fn a1_get_proxy_delay_ok_records_delay() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state.clone());
     let resp = delay_req(
@@ -1509,7 +1561,11 @@ async fn a1_get_proxy_delay_ok_records_delay() {
 
 #[tokio::test]
 async fn b1_missing_url_is_400_body_invalid() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
     let resp = delay_req(app, "/proxies/T/delay?timeout=1000".to_string()).await;
@@ -1520,7 +1576,11 @@ async fn b1_missing_url_is_400_body_invalid() {
 
 #[tokio::test]
 async fn b2_missing_timeout_is_400_body_invalid() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
     let resp = delay_req(app, format!("/proxies/T/delay?url={}", url_q())).await;
@@ -1531,7 +1591,11 @@ async fn b2_missing_timeout_is_400_body_invalid() {
 
 #[tokio::test]
 async fn b3_timeout_too_large_is_400() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
     let resp = delay_req(
@@ -1546,20 +1610,24 @@ async fn b3_timeout_too_large_is_400() {
 
 #[tokio::test]
 async fn b4_timeout_zero_is_400() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=0", url_q()),
-    )
-    .await;
+    let resp = delay_req(app, format!("/proxies/T/delay?url={}&timeout=0", url_q())).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn b5_unknown_proxy_is_404_resource_not_found() {
-    let adapter = TestAdapter::new("T", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5))).into_proxy();
+    let adapter = TestAdapter::new(
+        "T",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
     let resp = delay_req(
@@ -1602,11 +1670,7 @@ async fn b7_dial_exceeds_timeout_is_503() {
     .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
     let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=50", url_q()),
-    )
-    .await;
+    let resp = delay_req(app, format!("/proxies/T/delay?url={}&timeout=50", url_q())).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -1614,25 +1678,25 @@ async fn b7_dial_exceeds_timeout_is_503() {
 
 #[tokio::test]
 async fn d1_group_delay_ok_all_members_reported() {
-    let a = TestAdapter::new("A", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)))
-        .into_proxy();
-    let b = TestAdapter::new("B", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)))
-        .into_proxy();
-    let c = TestAdapter::new("C", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)))
-        .into_proxy();
-    let group = fallback_group("G", vec![a.clone(), b.clone(), c.clone()]);
-    let state = state_with_proxies(vec![
-        ("A", a),
-        ("B", b),
-        ("C", c),
-        ("G", group),
-    ]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/group/G/delay?url={}&timeout=1000", url_q()),
+    let a = TestAdapter::new(
+        "A",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
     )
-    .await;
+    .into_proxy();
+    let b = TestAdapter::new(
+        "B",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
+    let c = TestAdapter::new(
+        "C",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
+    let group = fallback_group("G", vec![a.clone(), b.clone(), c.clone()]);
+    let state = state_with_proxies(vec![("A", a), ("B", b), ("C", c), ("G", group)]);
+    let app = create_router(state);
+    let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = body_json(resp).await;
     let obj = body.as_object().unwrap();
@@ -1649,11 +1713,7 @@ async fn d2_group_delay_non_group_is_404() {
     let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
     let state = state_with_proxies(vec![("A", a)]);
     let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/group/A/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
+    let resp = delay_req(app, format!("/group/A/delay?url={}&timeout=1000", url_q())).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], br#"{"message":"resource not found"}"#);
@@ -1675,18 +1735,20 @@ async fn d3_group_delay_unknown_group_is_404() {
 #[tokio::test]
 async fn d4_group_delay_timeout_hits_504() {
     // Every member sleeps past the group-wide deadline → 504 Timeout.
-    let a = TestAdapter::new("A", DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)))
-        .into_proxy();
-    let b = TestAdapter::new("B", DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)))
-        .into_proxy();
+    let a = TestAdapter::new(
+        "A",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)),
+    )
+    .into_proxy();
+    let b = TestAdapter::new(
+        "B",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)),
+    )
+    .into_proxy();
     let group = fallback_group("G", vec![a.clone(), b.clone()]);
     let state = state_with_proxies(vec![("A", a), ("B", b), ("G", group)]);
     let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/group/G/delay?url={}&timeout=50", url_q()),
-    )
-    .await;
+    let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=50", url_q())).await;
     assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&bytes[..], br#"{"message":"Timeout"}"#);
@@ -1694,18 +1756,20 @@ async fn d4_group_delay_timeout_hits_504() {
 
 #[tokio::test]
 async fn d5_group_delay_records_into_each_member_history() {
-    let a = TestAdapter::new("A", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)))
-        .into_proxy();
-    let b = TestAdapter::new("B", DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)))
-        .into_proxy();
+    let a = TestAdapter::new(
+        "A",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
+    let b = TestAdapter::new(
+        "B",
+        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+    )
+    .into_proxy();
     let group = fallback_group("G", vec![a.clone(), b.clone()]);
     let state = state_with_proxies(vec![("A", a.clone()), ("B", b.clone()), ("G", group)]);
     let app = create_router(state);
-    let _ = delay_req(
-        app,
-        format!("/group/G/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
+    let _ = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
     assert_eq!(a.delay_history().len(), 1);
     assert_eq!(b.delay_history().len(), 1);
 }

@@ -92,7 +92,9 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
                 "GEOIP rule requires a GeoIP database, but none is configured".to_string()
             })?;
             let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
-            Ok(Box::new(GeoIpRule::new(payload, adapter, no_resolve, reader)))
+            Ok(Box::new(GeoIpRule::new(
+                payload, adapter, no_resolve, reader,
+            )))
         }
         _ => Err(format!("unknown rule type: {}", rule_type)),
     }
@@ -144,8 +146,7 @@ fn parse_logic_rule(
         return Err(format!("{} rule: missing adapter", rule_type));
     }
 
-    let groups = split_logic_groups(inner)
-        .map_err(|e| format!("{} rule: {}", rule_type, e))?;
+    let groups = split_logic_groups(inner).map_err(|e| format!("{} rule: {}", rule_type, e))?;
     if groups.is_empty() {
         return Err(format!("{} rule: empty payload", rule_type));
     }
@@ -323,11 +324,7 @@ mod tests {
 
     #[test]
     fn test_parse_or_rule() {
-        let rule = parse_rule(
-            "OR,((DOMAIN,a.com),(DOMAIN,b.com)),DIRECT",
-            &ctx(),
-        )
-        .unwrap();
+        let rule = parse_rule("OR,((DOMAIN,a.com),(DOMAIN,b.com)),DIRECT", &ctx()).unwrap();
         assert_eq!(rule.adapter(), "DIRECT");
         assert!(rule.match_metadata(&make_metadata("a.com", 80), &noop_helper()));
         assert!(rule.match_metadata(&make_metadata("b.com", 80), &noop_helper()));

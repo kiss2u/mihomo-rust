@@ -38,11 +38,7 @@ impl AppState {
 /// `Authorization: Bearer <secret>`. When the configured secret is empty or
 /// unset, the middleware is a no-op. Otherwise, requests without a matching
 /// header return `401 Unauthorized`.
-async fn require_auth(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn require_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     if !state.auth_required() {
         return next.run(req).await;
     }
@@ -55,7 +51,10 @@ async fn require_auth(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        });
 
     match provided {
         Some(token) if token == expected => next.run(req).await,
@@ -110,10 +109,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/proxy-groups/{name}/select",
             put(select_proxy_in_group),
         )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ));
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
     // present a token prompt; this matches upstream mihomo behaviour.
@@ -814,12 +810,12 @@ fn msg_err(status: StatusCode, message: &'static str) -> Response {
 /// Validate `url` and `timeout`. Returns `timeout` as `Duration` on success,
 /// or the `400 Body invalid` response on any validation failure — matching
 /// upstream's single "ErrBadRequest" shape for all parse errors.
-fn parse_delay_params(params: &DelayParams) -> Result<Duration, Response> {
+fn parse_delay_params(params: &DelayParams) -> Result<Duration, Box<Response>> {
     // upstream: hub/route/proxies.go::getProxyDelay — url is not strictly
     // validated upstream, but an empty host would panic our prober.
     let url = params.url.as_deref().unwrap_or("").trim();
     if url.is_empty() {
-        return Err(msg_err(StatusCode::BAD_REQUEST, "Body invalid"));
+        return Err(Box::new(msg_err(StatusCode::BAD_REQUEST, "Body invalid")));
     }
 
     // upstream parses `timeout` as int16 and treats parse failure as
@@ -827,13 +823,13 @@ fn parse_delay_params(params: &DelayParams) -> Result<Duration, Response> {
     let timeout_str = params
         .timeout
         .as_deref()
-        .ok_or_else(|| msg_err(StatusCode::BAD_REQUEST, "Body invalid"))?;
+        .ok_or_else(|| Box::new(msg_err(StatusCode::BAD_REQUEST, "Body invalid")))?;
     let timeout_ms: u16 = timeout_str
         .trim()
         .parse()
-        .map_err(|_| msg_err(StatusCode::BAD_REQUEST, "Body invalid"))?;
+        .map_err(|_| Box::new(msg_err(StatusCode::BAD_REQUEST, "Body invalid")))?;
     if timeout_ms == 0 {
-        return Err(msg_err(StatusCode::BAD_REQUEST, "Body invalid"));
+        return Err(Box::new(msg_err(StatusCode::BAD_REQUEST, "Body invalid")));
     }
     Ok(Duration::from_millis(timeout_ms as u64))
 }
@@ -841,7 +837,11 @@ fn parse_delay_params(params: &DelayParams) -> Result<Duration, Response> {
 /// Probe a single adapter and record the result into its health handle.
 /// Returns the measured delay (may be `0` on transport failure / timeout —
 /// caller decides how to surface that).
-async fn probe_and_record(proxy: &Arc<dyn mihomo_common::Proxy>, url: &str, timeout: Duration) -> u16 {
+async fn probe_and_record(
+    proxy: &Arc<dyn mihomo_common::Proxy>,
+    url: &str,
+    timeout: Duration,
+) -> u16 {
     let adapter: &dyn mihomo_common::ProxyAdapter = proxy.as_ref();
     let delay = mihomo_proxy::health::url_test(adapter, url, timeout).await;
     proxy.health().record_delay(delay);
@@ -855,7 +855,7 @@ async fn get_proxy_delay(
 ) -> Response {
     let timeout = match parse_delay_params(&params) {
         Ok(t) => t,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let url = params.url.as_deref().unwrap_or("").to_string();
 
@@ -889,7 +889,7 @@ async fn get_group_delay(
 ) -> Response {
     let timeout = match parse_delay_params(&params) {
         Ok(t) => t,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let url = params.url.as_deref().unwrap_or("").to_string();
 

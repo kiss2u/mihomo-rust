@@ -407,10 +407,7 @@ mod geoip_context_tests {
 
     #[test]
     fn missing_mmdb_with_geoip_rule_errors_with_path_and_rule() {
-        let raw = raw_with_rules(vec![
-            "DOMAIN,example.com,DIRECT",
-            "GEOIP,CN,DIRECT",
-        ]);
+        let raw = raw_with_rules(vec!["DOMAIN,example.com,DIRECT", "GEOIP,CN,DIRECT"]);
         let nonexistent = PathBuf::from("/nonexistent-test-path-42/Country.mmdb");
         let err = build_parser_context_at(&raw, nonexistent.clone())
             .expect_err("must fail-fast when mmdb is missing");

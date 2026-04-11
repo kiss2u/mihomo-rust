@@ -34,10 +34,7 @@ pub fn match_rules(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Option<Match
     None
 }
 
-fn maybe_enrich_with_process(
-    metadata: &Metadata,
-    rules: &[Box<dyn Rule>],
-) -> Option<Metadata> {
+fn maybe_enrich_with_process(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Option<Metadata> {
     if !metadata.process.is_empty() {
         return None;
     }
@@ -100,7 +97,10 @@ mod tests {
         let local = listener.local_addr().unwrap();
 
         let proc_name = current_process_name();
-        assert!(!proc_name.is_empty(), "expected a non-empty test binary name");
+        assert!(
+            !proc_name.is_empty(),
+            "expected a non-empty test binary name"
+        );
 
         let rules: Vec<Box<dyn Rule>> = vec![
             Box::new(ProcessRule::new(&proc_name, "Proxy")),
@@ -136,8 +136,7 @@ mod tests {
         // No rule reports `should_find_process()`, so the engine must not
         // perform any process lookup — exercised by passing a src_ip that
         // wouldn't correspond to any local socket.
-        let rules: Vec<Box<dyn Rule>> =
-            vec![Box::new(FinalRule::new("DIRECT"))];
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(FinalRule::new("DIRECT"))];
         let meta = Metadata {
             network: NetType::Tcp,
             src_ip: Some("203.0.113.1".parse().unwrap()),

@@ -320,11 +320,7 @@ mod tests {
     #[test]
     fn build_rule_set_dispatches_by_behavior() {
         let ctx = ParserContext::empty();
-        let set = build_rule_set(
-            RuleSetBehavior::Domain,
-            &["example.com".to_string()],
-            &ctx,
-        );
+        let set = build_rule_set(RuleSetBehavior::Domain, &["example.com".to_string()], &ctx);
         assert_eq!(set.behavior(), RuleSetBehavior::Domain);
         assert_eq!(set.len(), 1);
     }

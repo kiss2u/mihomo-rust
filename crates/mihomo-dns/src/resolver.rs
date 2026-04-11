@@ -328,12 +328,7 @@ mod tests {
         // `lookup_actual_all` return None; the test verifies (a) both calls
         // return the same result, (b) the map is clean on exit.
         let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-        let resolver = std::sync::Arc::new(Resolver::new(
-            vec![],
-            vec![],
-            DnsMode::Normal,
-            hosts,
-        ));
+        let resolver = std::sync::Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts));
         let r1 = resolver.clone();
         let r2 = resolver.clone();
         let (a, b) = tokio::join!(

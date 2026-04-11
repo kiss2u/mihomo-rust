@@ -89,7 +89,7 @@ YAML schema, struct shapes, error types, and per-layer tests.
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
 | M1.B-1 | VMess outbound (AEAD, legacy MD5 auth behind feature flag) | H | H | [`docs/specs/proxy-vmess.md`](specs/proxy-vmess.md) *(draft)* | engineer |
-| M1.B-2 | VLESS outbound (plain, XTLS-vision optional) | H | H | `docs/specs/proxy-vless.md` *(todo)* | engineer |
+| M1.B-2 | VLESS outbound (plain, XTLS-vision optional) | H | H | [`docs/specs/proxy-vless.md`](specs/proxy-vless.md) *(draft)* | engineer |
 | M1.B-3 | HTTP CONNECT outbound | M | L | small — fold into a single spec with M1.B-4 | engineer |
 | M1.B-4 | SOCKS5 outbound | M | L | `docs/specs/proxy-http-socks-outbound.md` *(todo)* | engineer |
 
@@ -161,7 +161,7 @@ YAML schema, struct shapes, error types, and per-layer tests.
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| M1.H-1 | `proxy-providers` (http/file, health-check, include-all) | H | M | `docs/specs/proxy-providers.md` *(todo)* | engineer |
+| M1.H-1 | `proxy-providers` (http/file, health-check, include-all) | H | M | [`docs/specs/proxy-providers.md`](specs/proxy-providers.md) *(draft)* | engineer |
 | M1.H-2 | Prometheus `/metrics` (traffic, conns, rule-match counters, proxy health) | H | L | `docs/specs/metrics-prometheus.md` *(todo)* | engineer |
 | M1.H-3 | Migration guide from Go mihomo (supported vs intentionally-not fields) | M | L | `docs/migration-from-go-mihomo.md` *(todo, PM)* | pm |
 
