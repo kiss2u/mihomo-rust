@@ -1,6 +1,6 @@
 # Spec: Load-balance proxy group (M1.C-1)
 
-Status: Draft (pm 2026-04-11, awaiting architect review)
+Status: Approved (architect 2026-04-11, engineer ready)
 Owner: pm
 Tracks roadmap item: **M1.C-1**
 Depends on: none — load-balance composes existing `ProxyAdapter`
@@ -90,6 +90,7 @@ Field reference:
 | 1 | Unknown `strategy` value — upstream falls back to round-robin | A | Unknown strategy means the user may get different distribution behaviour than intended. Hard-error at parse time. |
 | 2 | `strategy: consistent-hashing` with no alive proxies — upstream panics (index out of bounds) | A | We return `MihomoError::NoProxyAvailable` and surface it as a clean dial error. NOT a panic. |
 | 3 | All proxies dead — upstream returns the round-robin slot (dead proxy) | B | We return `NoProxyAvailable` error immediately instead of dialing a known-dead proxy. Same reachability outcome (connection fails), but our failure is fast and named. |
+| 4 | `strategy: consistent-hashing` uses modulo-hash, not ring-hash | B | Despite the name, upstream Go mihomo's implementation (`adapter/outbound/loadbalance.go`) uses the same `hash % alive.len()` modulo approach, not a ring. Rebalancing a proxy list reshuffles most assignments — users expecting minimal-disruption ring-consistent-hash should be aware. We match upstream; the label "consistent-hashing" means "stable for a given src IP given a fixed proxy list", not ring-consistent. |
 
 ## Internal design
 
@@ -146,7 +147,9 @@ impl LoadBalanceGroup {
     fn src_ip_bytes(metadata: &Metadata) -> &[u8] {
         // Extract the raw bytes of src_addr's IP.
         // IPv4: 4 bytes. IPv6: 16 bytes. Both are valid hash inputs.
-        // If src_addr is absent (local loopback test), hash 0.0.0.0.
+        // If src_addr is absent (local loopback test / API probe), hash 0.0.0.0
+        // (4 zero bytes). Every connectionwithout a src_addr hashes to the same
+        // proxy — deterministic, not random, not an error.
     }
 }
 ```
@@ -164,6 +167,11 @@ identical to the Go output.
 **No dependency on a crate for FNV** — 8 lines of inline math. Do
 not add `fnv` crate for a 1-function use. Implement inline with a
 comment `// FNV-1a 32-bit, matching upstream adapter/outbound/loadbalance.go::jumpHash logic shape`.
+
+**Alive-set Vec allocation** — `alive: Vec<_>` is rebuilt on every
+`select()` call. Fine at realistic proxy counts (N < 50). Add a
+`// TODO(perf M2): cache alive-set or use a pre-filtered index if profiling shows this hot`
+comment; do not optimize now.
 
 ### Health-check integration
 
@@ -235,6 +243,10 @@ that subset.
    endpoints probe path.
 9. `AdapterType::LoadBalance` is present in the enum and serialises
    to `"LoadBalance"` in JSON (for REST API `/proxies` response).
+10. Consistent-hashing with absent `src_addr` deterministically selects
+    one proxy (not random, not `NoProxyAvailable`) — hashes to 0.0.0.0.
+11. Round-robin does not panic or return a stale index when the alive-set
+    shrinks between calls (proxy flap scenario).
 
 ## Test plan (starting point — qa owns final shape)
 
@@ -259,6 +271,14 @@ that subset.
   dial-dead-proxy as upstream does).
   Upstream: Go code panics with index out of bounds in the consistent-
   hash path; we return a clean error.
+- `consistent_hashing_absent_src_addr_deterministic` — `src_addr: None`,
+  assert same proxy selected across 10 calls (hashes to 0.0.0.0 fallback).
+  NOT random. NOT error. Upstream: undefined (assumes src always present).
+- `round_robin_handles_alive_set_flap` — 3 alive proxies; call select()
+  once; mark proxy-1 dead; call select() again; assert no panic and
+  returned index is valid (0 or 2). NOT stale index, NOT out-of-bounds.
+  Guards against future refactor that would make modulo unsafe on
+  shrinking alive-set.
 
 **Unit (config parser):**
 

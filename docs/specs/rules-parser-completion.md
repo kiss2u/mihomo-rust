@@ -1,6 +1,6 @@
 # Spec: Rule parser completion (M1.D-1, M1.D-3, M1.D-6)
 
-Status: Draft (pm 2026-04-11, awaiting architect review)
+Status: Approved (architect 2026-04-11, qa kickoff authorized)
 Owner: pm
 Tracks roadmap items: **M1.D-1** (IN-PORT, DSCP, UID, SRC-GEOIP,
 PROCESS-PATH), **M1.D-3** (IP-SUFFIX, IP-ASN), **M1.D-6**
@@ -86,17 +86,28 @@ header.
 DSCP,46,PROXY       # EF (Expedited Forwarding)
 ```
 
-`Metadata.dscp` is populated by the TProxy listener (which has access
-to the raw IP packet) but is `0` for HTTP/SOCKS5 listeners (which
-receive TCP connections, not raw packets). The rule still matches if
-`dscp == 0` and the payload is `0` — this is correct behaviour (a
-packet with DSCP=0 is best-effort, which is the default).
+`Metadata.dscp: Option<u8>` — **change from `u8` to `Option<u8>`**
+(architect approved, 2026-04-11). Rationale: previous `u8` defaulting
+to `0` caused `DSCP,0` to match every HTTP/SOCKS5 connection —
+indistinguishable from "unset". Fix:
 
-**Open question for architect:** should HTTP/SOCKS5 listeners set
-`dscp` to `None` (Option<u8>) so DSCP rules can distinguish "unknown"
-from "explicitly zero"? My lean: yes — change `Metadata.dscp` from
-`u8` to `Option<u8>`. `None` on non-TProxy paths; `DSCP,46` never
-matches a `None` DSCP. See §Open questions #2.
+- **TProxy listener**: `Some(ip_tos >> 2)` — mask off the 2 low-order
+  ECN bits (`IP_RECVTOS` / `IPV6_TCLASS` cmsg value, right-shifted by 2).
+  If the kernel didn't deliver the cmsg, leave as `None` (NOT `Some(0)`
+  — that reintroduces the bug on TProxy traffic where DSCP was unreadable).
+- **HTTP / SOCKS5 / Mixed listeners**: `None` unconditionally. Add a
+  comment at each listener's metadata-building path:
+  `// DSCP not set for this listener type; see Metadata::dscp`.
+- **Match semantics**: `Some(n) == payload` matches; `None` never
+  matches, not even `DSCP,0`. This is Class A (silent misroute →
+  now impossible).
+- **Serde**: `#[serde(skip_serializing_if = "Option::is_none")]` on
+  the `dscp` field in Metadata — cleaner than serializing `null`. Any
+  dashboard reading a missing `dscp` field should treat it as absent;
+  if a dashboard breaks, that is a dashboard bug.
+- **Breaking change footprint**: ~10-15 call sites across the workspace
+  (compiler finds them). Most are trivial: `metadata.dscp == payload`
+  → `metadata.dscp == Some(payload)`.
 
 Implementation: `DscpRule` struct in `crates/mihomo-rules/src/dscp.rs`.
 Parse payload as `u8`, validate 0–63. Out-of-range → parse error.
@@ -207,8 +218,14 @@ support it; neither do we (most users expect `*` to mean any-label).
 Implementation: expand `*` to a regex `[^.]+` and compile once at
 parse time (cache in the rule struct). Do not use the `glob` crate
 — it matches filesystem paths with different semantics (e.g., `*`
-matches `/` on some glob implementations). A two-regex lines in
+matches `/` on some glob implementations). Two regex lines in
 `new()` is sufficient.
+
+**Upstream verification required (engineer):** before writing
+byte-exact tests, confirm in `rules/common/domain_wildcard.go` that
+upstream treats `*` as single-label (`[^.]+`) and NOT as multi-label
+(`[^.]+(?:\.[^.]+)*`). If upstream is multi-label, the regex changes.
+Cite the upstream line number in a comment in `domain_wildcard.rs`.
 
 Upstream reference: `rules/common/domain_wildcard.go`.
 
@@ -241,9 +258,21 @@ where prefix_len ≤ 32 (IPv4) or 128 (IPv6)"`.
 Add `RuleType::IpSuffix` to `mihomo-common/src/rule.rs`.
 New file: `crates/mihomo-rules/src/ip_suffix.rs`.
 
-**Open question for architect** — see §Open questions #1: upstream
-Go mihomo's implementation of `IP-SUFFIX` (confirm the right-mask
-semantics above vs. any alternative interpretation I may have missed).
+**IP-SUFFIX endianness note (engineer must verify before writing
+byte-exact test vectors):** The "right-mask on low N bits" semantic is
+confirmed by architect as correct at the intent level. However, the
+exact byte-order of how upstream stores the payload IP and applies the
+mask at parse vs. match time must be verified from the upstream source
+before committing test vectors. Do this:
+
+1. Locate `rules/common/ipcidr.go::Match` in the upstream Go codebase.
+2. Paste the relevant lines into a comment block in `ip_suffix.rs` as
+   the authoritative reference.
+3. Derive test vectors from that source, not from this spec. Every
+   vector in the unit test cites `rules/common/ipcidr.go:<lineno>`.
+
+This is not a blocker for spec approval — the high-level semantic is
+right. It is a blocker for writing the byte-exact acceptance tests.
 
 Upstream reference: `rules/common/ipcidr.go` (IP-SUFFIX branch there,
 or a separate file — verify at implementation time).
@@ -276,10 +305,24 @@ If `asn` is `None` and an `IP-ASN` rule is parsed, hard-error:
 'geo-data.asn-path' in dns: or top-level config"`. Class A per
 ADR-0002: silently skipping the rule causes misrouting.
 
-**Config field for ASN DB path** — needs a new top-level or
-`geodata:` YAML field. Suggest `geodata-path` or `asn-db-path`.
-Engineer: follow the same pattern as the GEOIP DB path. Flag as
-**open question #3** for architect.
+**ASN DB discovery chain** (architect approved, 2026-04-11 — no new
+YAML key in M1; mirrors the existing GEOIP Country.mmdb pattern):
+
+1. `$XDG_CONFIG_HOME/mihomo/GeoLite2-ASN.mmdb`
+2. `$HOME/.config/mihomo/GeoLite2-ASN.mmdb`
+3. `./mihomo/GeoLite2-ASN.mmdb`
+
+Lazy-load: scan rules at parse time for any `IP-ASN` entries; only
+load the DB if at least one `IP-ASN` rule exists (same pattern as
+GEOIP in M0-4). Hard-error if rules require it and the discovery chain
+finds no file — same verbatim error format as GEOIP's missing-DB error.
+
+A `geodata:` YAML subsection (for `geodata-mode`, `geox-url`,
+`asn-path`, auto-update) is **out of scope for M1** — the full design
+of that subsection is tracked as a follow-up. Users who need a custom
+path today drop the file at the discovery path or symlink it.
+Migration guide (#14) notes that `geox-url` is currently ignored and
+ASN loads from the discovery chain.
 
 Add `RuleType::IpAsn` to `mihomo-common/src/rule.rs`.
 New file: `crates/mihomo-rules/src/ip_asn.rs`.
@@ -294,10 +337,11 @@ Upstream reference: `rules/common/ipasn.go`.
 | # | Rule | Case | Class | Rationale |
 |---|------|------|:-----:|-----------|
 | 1 | `UID` | Parsed on non-Linux → always non-matching | B | Warn-once; no routing change. Same as upstream (UID rules are meaningless on macOS/Windows). |
-| 2 | `PROCESS-PATH` | Prefix match when payload starts with `/` | B | User's exact-path config still works; prefix is additive extension. Upstream exact-match only. |
+| 2 | `PROCESS-PATH` | Prefix match when payload starts with `/` | B | Prefix match is strictly more permissive than upstream exact-match: any config that worked with exact-match still works (the full binary path still matches as a prefix of itself). Users relying on exact-match can still write full binary paths. The extension adds value for configs that use directory paths (`/Applications/Safari.app`). No previously-passing config breaks. Upstream exact-match only (`rules/common/process.go`). |
 | 3 | `IP-ASN` | Missing ASN DB → hard-error | A | Silently skipping causes misrouting (ASN-gated traffic bypasses intended proxy). Class A. |
 | 4 | `DOMAIN-WILDCARD` | No `?` wildcard support | B | Upstream does not support `?` either; this is a match, not a divergence. |
 | 5 | Any of these rule types | Absent from parser → silently skipped today | A | The status quo is the bug. This spec fixes it. |
+| 6 | `DSCP` | `Metadata.dscp` changed from `u8` to `Option<u8>` | A | Previous `u8` default `0` caused `DSCP,0` to match every HTTP/SOCKS5 connection silently. Fix: `None` (non-TProxy) never matches. This is a Class A fix relative to previous mihomo-rust behavior (not Go mihomo, which also sets DSCP only on TProxy). |
 
 ## Acceptance criteria
 
@@ -351,6 +395,11 @@ A PR implementing this spec must:
 - `dscp_no_match` — payload `46`, dscp `Some(0)` → false.
 - `dscp_none_metadata_never_matches` — dscp `None` → false.
   This is the HTTP/SOCKS5 case: DSCP unknown, rule should not fire.
+  Class A per ADR-0002: previous `u8` default-0 caused silent misroute.
+- `dscp_rule_never_matches_unset_metadata` — `DSCP,0,DIRECT`, dscp
+  `None` (HTTP/SOCKS5 listener) → false. NOT a match on zero.
+  This is the bug the `Option<u8>` change fixes: `DSCP,0` must NOT
+  match connections whose DSCP was never set.
 - `dscp_out_of_range_payload_errors` — `"64"` → parse error (max 63).
   Upstream: `rules/common/dscp.go` validates 0–63.
 
@@ -397,12 +446,23 @@ A PR implementing this spec must:
   host `foo.notexample.com` → false.
 
 *IP-SUFFIX:*
-- `ip_suffix_ipv4_match` — payload `1.0.0.0/8`, IP `8.8.8.1` → true
-  (last 8 bits = 0x01).
-- `ip_suffix_ipv4_no_match` — payload `1.0.0.0/8`, IP `8.8.8.2` → false.
-- `ip_suffix_ipv6_match` — payload `::1/8`, IPv6 addr with last byte 1
-  → true.
+- `ip_suffix_matches_upstream_reference_vectors` — **before writing,
+  derive all four vectors from `rules/common/ipcidr.go::Match` in the
+  upstream Go codebase**. Cite the file + line number in a comment
+  on each test case. Required vectors:
+  - IPv4 /32 (single low bit): payload `0.0.0.1/32`, IP `8.8.8.1` → true;
+    IP `8.8.8.2` → false.
+  - IPv4 /24: payload derived from upstream — confirm low-24-bit mask.
+  - IPv6 /64: payload and test IP derived from upstream.
+  - IPv6 /128: exact match case.
+  Byte-exact test vectors must NOT be derived from this spec alone —
+  derive from upstream source to catch endianness / parse-time
+  masking subtleties.
+- `ip_suffix_ipv4_no_match_differs_low_bits` — a second IPv4 /8 case
+  that fails, confirming the mask is applied correctly.
 - `ip_suffix_invalid_payload_errors` — `"not-an-ip"` → parse error.
+  Error message must be distinct from IP-CIDR: `"invalid IP-SUFFIX: ..."`.
+  NOT same error as IP-CIDR.
 
 *IP-ASN:*
 - `ip_asn_match` — Cloudflare IP (e.g. `1.1.1.1`), payload `13335`,
@@ -431,32 +491,28 @@ A PR implementing this spec must:
 - [ ] Extend `ParserContext` with `asn: Option<Arc<maxminddb::Reader<Vec<u8>>>>`.
 - [ ] Resolve §Open question #3 with architect (ASN DB config key)
       before wiring `IP-ASN` through `load_config`.
-- [ ] Change `Metadata.dscp` to `Option<u8>` (pending architect
-      sign-off on §Open question #2). Update all listener code that
-      sets `dscp`.
+- [ ] Change `Metadata.dscp` to `Option<u8>` (architect approved,
+      2026-04-11). TProxy: `Some(ip_tos >> 2)`; other listeners: `None`.
+      Add `#[serde(skip_serializing_if = "Option::is_none")]` to the
+      Metadata field. Update all listener code that sets `dscp`.
 - [ ] `#[cfg(target_os = "linux")]` guard on `uid.rs` match logic.
       Parse succeeds cross-platform; match returns false on non-Linux.
 - [ ] Ensure existing 78 rules tests pass with no regressions.
 - [ ] Update `docs/roadmap.md` M1.D-1, D-3, D-6 rows with merged PR link.
 
-## Open questions (architect input requested)
+## Resolved questions (architect sign-off 2026-04-11)
 
-1. **IP-SUFFIX semantics.** Confirm the right-mask interpretation
-   (least-significant bits match) is correct. Upstream's
-   `rules/common/ipcidr.go` or a dedicated file — I want to verify
-   before speccing the byte-exact test vectors.
+1. **IP-SUFFIX semantics.** "Right-mask on low N bits" semantic confirmed
+   at intent level. **Byte-exact test vectors must be derived from
+   upstream source at implementation time** — see §Test plan for the
+   `ip_suffix_matches_upstream_reference_vectors` requirement. Not a
+   blocker for spec approval.
 
-2. **`Metadata.dscp: Option<u8>` vs `u8`.** Current `Metadata` type —
-   is `dscp` already present? If `u8`, should we change to `Option<u8>`
-   so DSCP rules can distinguish "TProxy set DSCP=0" from "listener
-   didn't set DSCP"? My lean: `Option<u8>` is cleaner and prevents
-   false-matches from rules like `DSCP,0` on HTTP-listener traffic.
+2. **`Metadata.dscp: Option<u8>`** — approved. See §DSCP section for
+   full constraints (TProxy: `Some(ip_tos >> 2)`; others: `None`;
+   serde: `skip_serializing_if = "Option::is_none"`).
 
-3. **ASN DB config path.** What top-level YAML key should the ASN
-   database path live under? Options: `geodata.asn-path`,
-   `asn-db-path`, folding into an existing `geodata-mode` / `geox-url`
-   config section. My lean: `geodata.asn-path` alongside the
-   country DB, since they're the same format from the same vendor
-   (MaxMind). Gap-analysis §6 mentions `geodata-mode` and `geox-url`
-   as missing keys — this might be the right time to add a minimal
-   `geodata:` subsection.
+3. **ASN DB config path** — no `geodata:` YAML subsection in M1.
+   Use same file discovery chain as GEOIP Country.mmdb with the
+   upstream-compatible filename `GeoLite2-ASN.mmdb`. See §IP-ASN for
+   the chain. A `geodata:` subsection is tracked as a follow-up for M2+.

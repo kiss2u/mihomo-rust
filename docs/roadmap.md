@@ -148,13 +148,13 @@ YAML schema, struct shapes, error types, and per-layer tests.
 |---|------|:-----:|:----:|------|-------|
 | M1.G-1 | Bearer `secret` auth enforcement (= M0-1, tracked here too) | H | L | trivial, fold into M0-1 | engineer |
 | M1.G-2 | `GET /proxies/:name/delay` and `GET /group/:name/delay` | H | L | [`docs/specs/api-delay-endpoints.md`](specs/api-delay-endpoints.md) *(draft)* | engineer |
-| M1.G-3 | `GET /logs` websocket stream | H | M | `docs/specs/api-logs-websocket.md` *(todo)* | engineer |
-| M1.G-4 | `GET /memory` websocket (runtime RSS stream) | M | L | bundle with M1.G-3 | engineer |
+| M1.G-3 | `GET /logs` websocket stream | H | M | [`docs/specs/api-logs-websocket.md`](specs/api-logs-websocket.md) *(draft)* | engineer |
+| M1.G-4 | `GET /memory` websocket (runtime RSS stream) | M | L | bundled into M1.G-3 spec | engineer |
 | M1.G-5 | `GET/PUT /providers/rules[/:name]` | M | L | depends on M1.D-5 | engineer |
 | M1.G-6 | `GET/PUT /providers/proxies[/:name]` + proxy providers impl | H | M | depends on M1.H-1 | engineer |
-| M1.G-7 | `DELETE /connections` (bulk) | L | L | trivial | engineer |
-| M1.G-8 | `GET /dns/query` (align with upstream; current is POST) | L | L | additive; keep POST for back-compat | engineer |
-| M1.G-9 | `POST /cache/dns/flush` | L | L | trivial | engineer |
+| M1.G-7 | `DELETE /connections` (bulk) | L | L | bundled into M1.G-3 spec | engineer |
+| M1.G-8 | `GET /dns/query` (align with upstream; current is POST) | L | L | bundled into M1.G-3 spec | engineer |
+| M1.G-9 | `POST /cache/dns/flush` | L | L | bundled into M1.G-3 spec | engineer |
 | M1.G-10 | `PUT /configs` (reload from path/body) | M | M | `docs/specs/api-config-reload.md` *(todo)*; relates to M3 hot-reload | engineer |
 
 ### M1.H — Providers & observability

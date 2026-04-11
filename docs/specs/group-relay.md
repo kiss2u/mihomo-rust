@@ -1,6 +1,6 @@
 # Spec: Relay proxy group (M1.C-2)
 
-Status: Draft (pm 2026-04-11, awaiting architect review)
+Status: Approved (architect 2026-04-11, unblocked once M1.B-1 VMess lands `connect_over` trait change)
 Owner: pm
 Tracks roadmap item: **M1.C-2**
 Depends on: none beyond the existing `ProxyAdapter` trait.
@@ -102,7 +102,8 @@ Field reference:
 
 **No `url`, `interval`, `strategy`, or `lazy`** — relay is a fixed
 chain, not a selection pool. Presence of these fields is accepted and
-silently ignored (forward-compat, not a parse error) with a warn-once.
+ignored (forward-compat, not a parse error) with a warn-once at parse
+time.
 
 **Divergences from upstream** (classified per
 [ADR-0002](../adr/0002-upstream-divergence-policy.md)):
@@ -142,66 +143,78 @@ over whatever stream is provided. The relay implementation provides the
 *prior-hop's established stream* as the underlying connection, passing
 proxy addresses as the target metadata.
 
-### How to call `dial_tcp` "through an existing conn"
+### Architecture decision: `connect_over` on `ProxyAdapter` (architect approved 2026-04-11)
 
-Each `ProxyAdapter::dial_tcp` is expected to initiate a new TCP
-connection internally. For relay, we need to wrap an existing stream
-as the "TCP connection" for the next hop. This requires the adapters
-to support a "dial over existing stream" path — or the relay layer
-needs to insert a `Metadata` with the hop's address and somehow pass
-the existing stream.
+**Option (a) — `connect_over(stream, metadata)` required method on `ProxyAdapter`.**
 
-**Engineer note — open architecture question (see §Open questions
-#1).** The cleanest approach depends on whether `ProxyAdapter` gains
-a `connect_over(stream, metadata)` method or the relay constructs
-connection-specific adapters. The spec states the requirement; the
-implementation path is for architect to decide.
+Signature:
 
-In the interim, the simplest conforming approach: each proxy type's
-`dial_tcp` dials its configured server:port directly from a TCP socket.
-Relay could instead construct a fresh `Metadata` pointing at proxy[1]
-for the call to proxy[0]'s `dial_tcp`. This gives proxy[0] a connection
-to proxy[1] — but only if proxy[0]'s `dial_tcp` implementation accepts
-an arbitrary `Metadata` target (which is the contract: `metadata.dest`
-is the target to CONNECT to, while the proxy's own `server:port` is the
-server to dial).
+```rust
+async fn connect_over(
+    &self,
+    stream: Box<dyn ProxyConn>,
+    meta: &Metadata,
+) -> Result<Box<dyn ProxyConn>>;
+```
 
-So the relay algorithm is actually:
+Each adapter implements this to wrap the passed stream with its own
+protocol header + framing, without dialing a fresh TCP socket. The
+relay chain calls `dial_tcp` on the first proxy (establishes a real
+TCP connection), then `connect_over` on each subsequent hop.
+
+**Required method — no default impl.** Do NOT provide a default
+implementation that falls back to `dial_tcp`. A silent default would
+let adapters that forget to override appear to work in unit tests while
+failing relay in production. Every adapter author must consciously
+implement `connect_over`. The compiler enforces this.
+
+**Special cases:**
+- `DirectAdapter::connect_over` — returns the passed stream unchanged.
+  A direct hop in a relay chain is a no-op (useful for
+  `relay: [direct, ss-node]`).
+- `RejectAdapter::connect_over` — returns `Err(MihomoError::Rejected)`.
+
+**Breaking change scope:** this trait change touches every
+`ProxyAdapter` impl (Direct, Reject, Shadowsocks, Trojan, and M1.B
+VMess/VLESS once they land). **M1.B should land before M1.C-2** so
+VMess/VLESS start with `connect_over` in their shape from day one
+rather than being retrofitted. If M1.C-2 lands first, pay the retrofit
+cost on VMess/VLESS. See team-lead for sequencing decision.
+
+**Relay algorithm:**
 
 ```rust
 async fn relay_tcp(
     proxies: &[Arc<dyn Proxy>],
     final_target: &Metadata,
 ) -> Result<Box<dyn ProxyConn>> {
-    assert!(proxies.len() >= 2);
+    debug_assert!(proxies.len() >= 2, "relay chain validated at parse time");
 
-    // Build a chain of Metadata targets:
-    // proxy[0] dials to proxy[1].server:proxy[1].port
-    // proxy[1] dials to proxy[2].server:proxy[2].port
-    // ...
-    // proxy[N-2] dials to proxy[N-1].server:proxy[N-1].port
-    // proxy[N-1] dials to final_target
-
-    // Start the outermost tunnel: dial proxy[0], target = proxy[1]'s addr
+    // proxy[0]: real TCP connect, target = proxy[1]'s server:port
     let mut meta = metadata_for_proxy(&proxies[1]);
-    let mut conn: Box<dyn ProxyConn> = proxies[0].dial_tcp(&meta).await?;
+    let mut conn: Box<dyn ProxyConn> = proxies[0].dial_tcp(&meta).await
+        .map_err(|e| MihomoError::relay_hop_failed(0, e))?;
 
-    // Thread through each intermediate hop
+    // proxy[1..N-2]: connect_over the previous hop's established stream
     for i in 1..proxies.len() - 1 {
         meta = metadata_for_proxy(&proxies[i + 1]);
-        conn = proxies[i].connect_over(conn, &meta).await?;
+        conn = proxies[i].connect_over(conn, &meta).await
+            .map_err(|e| MihomoError::relay_hop_failed(i, e))?;
     }
 
-    // Final hop: connect to actual target
-    conn = proxies[proxies.len() - 1].connect_over(conn, final_target).await?;
+    // proxy[N-1]: final hop connects to the actual target
+    let last = proxies.len() - 1;
+    conn = proxies[last].connect_over(conn, final_target).await
+        .map_err(|e| MihomoError::relay_hop_failed(last, e))?;
     Ok(conn)
 }
 ```
 
-Where `connect_over(existing_conn, metadata)` is the new method that
-lets a ProxyAdapter send its protocol header over an existing stream
-rather than dialing a fresh TCP socket. This is the core architecture
-question in §Open questions #1.
+**Nested relay groups** (relay-of-relay) work transparently:
+`RelayGroup` itself implements `ProxyAdapter`, so its `connect_over`
+runs the inner chain starting from the passed stream as the base
+connection. No special casing needed. This is confirmed correct by
+architect.
 
 ### Struct
 
@@ -237,11 +250,19 @@ impl ProxyAdapter for RelayGroup {
 
 ### Error handling
 
-Intermediate hop failures surface as their own error type (e.g.
-`ShadowsocksError::HandshakeFailed`) wrapped in a relay-level context
-message: "relay chain failed at hop 1 (proxy-b → proxy-c):
-\<inner error\>". Engineer: use `anyhow::Context::context()` at each
-hop step.
+Intermediate hop failures surface wrapped in `MihomoError::RelayHopFailed`:
+
+```rust
+MihomoError::RelayHopFailed { hop: usize, source: Box<MihomoError> }
+```
+
+Error message shape: `"relay chain failed at hop 1 (proxy-b → proxy-c): <inner error>"`.
+
+Add `RelayHopFailed` to `MihomoError` in `mihomo-common`. Do NOT use
+`anyhow::Context::context()` at the public boundary — `MihomoError`
+is the error type for all `ProxyAdapter` results. Use anyhow only for
+internal plumbing within the relay implementation, not at the return
+boundary.
 
 ## Acceptance criteria
 
@@ -260,7 +281,11 @@ hop step.
    field. Class B per ADR-0002.
 9. `AdapterType::Relay` serialises to `"Relay"` in JSON.
 10. Group-reference in relay chain (e.g. a Selector as proxy[0])
-    resolves correctly at dial time via the Selector's `dial_tcp`.
+    resolves correctly at dial time via the Selector's `connect_over`.
+11. Nested relay-of-relay (outer relay whose proxy[0] is itself a
+    RelayGroup) delivers bytes to mock target without panicking.
+12. `MihomoError::RelayHopFailed { hop, source }` is used at hop
+    boundaries — NOT `anyhow::Context` at the public return type.
 
 ## Test plan (starting point — qa owns final shape)
 
@@ -284,11 +309,19 @@ hop step.
   `support_udp = false`; assert `Err(UdpNotSupported)`.
   Class A per ADR-0002. Upstream: returns a non-functional conn.
   NOT a silent failure — must be `UdpNotSupported` specifically.
+  Run this variant three times: lacking-UDP proxy is at position 0
+  (first hop), middle position, and last position — all must error.
 - `relay_hop_failure_includes_hop_index` — mock proxy[1] errors;
-  assert the returned error message contains "hop 1".
+  assert the returned `MihomoError::RelayHopFailed` contains `hop == 1`.
+  NOT a raw inner error with no relay context. `anyhow` NOT at boundary.
 - `relay_url_interval_fields_warn_once` — YAML with `url:` +
   `interval:` on a relay group → exactly one `warn!` per unexpected
   field. Class B per ADR-0002.
+- `relay_nested_relay_group` — outer 2-hop relay where proxy[0] is
+  itself a 2-hop `RelayGroup` (4 effective hops total). Assert payload
+  arrives at mock target. Guards the transparent nesting property
+  confirmed by architect. Acceptable to mark `#[ignore]` if it requires
+  4 fully-implemented adapters not yet available in M1.
 
 **Integration:**
 
@@ -300,52 +333,34 @@ hop step.
 
 ## Implementation checklist (for engineer handoff)
 
+**Sequencing: M1.B-1 (VMess) must land before this PR starts.**
+Team-lead confirmed 2026-04-11: M1.B before M1.C-2. The M1.B-1 VMess
+PR introduces `connect_over` to the `ProxyAdapter` trait and retrofits
+Direct/Reject/Shadowsocks/Trojan in the same commit. M1.C-2 engineer
+picks up relay once that trait change is in main.
+
 - [ ] Add `AdapterType::Relay` to `mihomo-common/src/adapter_type.rs`.
-- [ ] Resolve §Open question #1 with architect before writing
-      `relay.rs` — the `connect_over(stream, metadata)` decision
-      determines the entire relay implementation shape.
-- [ ] Implement `group/relay.rs` once architecture is settled.
-      Comment at top of file cites upstream:
+- [ ] Add `connect_over(&self, stream: Box<dyn ProxyConn>, meta: &Metadata) -> Result<Box<dyn ProxyConn>>`
+      to the `ProxyAdapter` trait in `mihomo-common`. Required method —
+      no default impl. Update ALL existing adapters (Direct, Reject,
+      Shadowsocks, Trojan) before implementing RelayGroup.
+- [ ] Add `MihomoError::RelayHopFailed { hop: usize, source: Box<MihomoError> }`
+      to `mihomo-common`.
+- [ ] Implement `group/relay.rs`. Comment at top cites upstream:
       `// upstream: adapter/outbound/relay.go`.
+      Add `debug_assert!(proxies.len() >= 2)` in `RelayGroup::new`.
 - [ ] Wire `parse_proxy_group` in `mihomo-config` to recognise
       `type: relay`. Hard-errors for `proxies.len() < 2`.
 - [ ] Update `docs/roadmap.md` M1.C-2 row with merged PR link.
 
-## Open questions (architect input requested)
+## Resolved questions (architect sign-off 2026-04-11)
 
-1. **`connect_over(stream, metadata)` on `ProxyAdapter` — or a
-   different relay mechanism?** This is the load-bearing architecture
-   question for relay. Three options:
+1. **Architecture: `connect_over` on `ProxyAdapter`** — Option (a)
+   approved. Required method (no default impl). Each adapter splits
+   "dial TCP" from "send protocol header over stream". `DirectAdapter`
+   returns stream unchanged; `RejectAdapter` returns error.
 
-   a. **New `connect_over` method on `ProxyAdapter`** (my lean):
-      `async fn connect_over(&self, stream: Box<dyn ProxyConn>, meta: &Metadata) -> Result<Box<dyn ProxyConn>>`.
-      Each adapter implements this to wrap the passed stream with its
-      own protocol header + framing, without dialing a fresh TCP
-      socket. Relay calls this in sequence. Default implementation can
-      call `dial_tcp` (for adapters that don't implement it specially),
-      but adapters that currently open TCP internally (Shadowsocks,
-      VMess, etc.) need to split their connection logic into "dial TCP"
-      vs "send protocol header over stream".
-      **Pro:** clean separation; each adapter owns its relay logic.
-      **Con:** breaking change on the `ProxyAdapter` trait; every
-      existing adapter needs a `connect_over` impl.
-
-   b. **Relay wraps each adapter with a custom dialer** that returns
-      the already-established stream instead of opening a new TCP
-      socket. This would require a `TcpDialer` abstraction on each
-      adapter that can be swapped at relay time.
-      **Pro:** no trait change.
-      **Con:** requires each adapter to accept an injected dialer,
-      which may require constructor changes.
-
-   c. **Relay only works with proxies that use CONNECT semantics**
-      (HTTP CONNECT, SOCKS5 CONNECT). Not viable for Shadowsocks/VMess.
-
-   Option (a) is the cleanest for long-term composability. Option (b)
-   works for M1 if (a) is too disruptive to the existing adapter
-   codebase. Please advise before engineer starts implementation.
-
-2. **Relay group referencing another relay group.** My expectation:
-   works transparently, since relay groups implement `ProxyAdapter`
-   and `dial_tcp` is the only interface relay needs. No special
-   handling required. Confirm?
+2. **Relay-of-relay (nested relay groups)** — works transparently.
+   `RelayGroup` implements `ProxyAdapter`; its `connect_over` runs the
+   inner chain from the passed stream. No special casing. Add
+   `relay_nested_relay_group` test bullet.

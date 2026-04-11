@@ -324,10 +324,7 @@ mod tests {
             .ok()
             .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
             .expect("current_exe should be readable in tests");
-        assert_eq!(
-            info.name, expected,
-            "process name must not be truncated"
-        );
+        assert_eq!(info.name, expected, "process name must not be truncated");
     }
 
     #[test]
