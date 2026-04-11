@@ -140,14 +140,27 @@ mod platform {
             for fd in rd.flatten() {
                 if let Ok(link) = fs::read_link(fd.path()) {
                     if link.to_string_lossy() == needle {
-                        let comm = fs::read_to_string(entry.path().join("comm"))
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
-                        let exe = fs::read_link(entry.path().join("exe"))
+                        let exe_link = fs::read_link(entry.path().join("exe")).ok();
+                        // `/proc/<pid>/comm` is truncated to TASK_COMM_LEN-1 = 15
+                        // chars, which mangles long binary names (e.g. cargo test
+                        // harnesses like `mihomo_tunnel-<16hex>`). Prefer the
+                        // basename of `/proc/<pid>/exe` and fall back to comm only
+                        // when exe is unreadable (kernel threads, perm denied).
+                        let name = exe_link
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| {
+                                fs::read_to_string(entry.path().join("comm"))
+                                    .unwrap_or_default()
+                                    .trim()
+                                    .to_string()
+                            });
+                        let exe = exe_link
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        return Some((pid, comm, exe));
+                        return Some((pid, name, exe));
                     }
                 }
             }
