@@ -56,9 +56,20 @@ async fn require_auth(State(state): State<Arc<AppState>>, req: Request, next: Ne
                 .or_else(|| v.strip_prefix("bearer "))
         });
 
-    match provided {
-        Some(token) if token == expected => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+    // Constant-time comparison so a byte-by-byte attacker cannot distinguish
+    // "first N bytes matched" from "failed immediately". Length still leaks;
+    // that is acceptable for a config-scoped shared secret.
+    let ok = match provided {
+        Some(token) if token.len() == expected.len() => {
+            use subtle::ConstantTimeEq;
+            token.as_bytes().ct_eq(expected.as_bytes()).into()
+        }
+        _ => false,
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
     }
 }
 
