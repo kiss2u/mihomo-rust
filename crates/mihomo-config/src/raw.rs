@@ -23,6 +23,26 @@ pub struct RawConfig {
     pub tproxy_port: Option<u16>,
     pub tproxy_sni: Option<bool>,
     pub routing_mark: Option<u32>,
+    /// Static host → IP mappings, preferred over upstream DNS lookups.
+    /// Values may be a single IP string or a list of IPs.
+    pub hosts: Option<HashMap<String, HostsValue>>,
+}
+
+/// A `hosts:` map value: either a single IP address or a list of addresses.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum HostsValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl HostsValue {
+    pub fn as_slice(&self) -> Vec<&str> {
+        match self {
+            HostsValue::One(s) => vec![s.as_str()],
+            HostsValue::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

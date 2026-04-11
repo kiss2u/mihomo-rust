@@ -9,14 +9,20 @@ use mihomo_rules::final_rule::FinalRule;
 use mihomo_rules::ipcidr::IpCidrRule;
 use mihomo_rules::logic::{AndRule, NotRule, OrRule};
 use mihomo_rules::network::NetworkRule;
-use mihomo_rules::parse_rule;
 use mihomo_rules::port::PortRule;
 use mihomo_rules::process::ProcessRule;
+use mihomo_rules::{parse_rule as parse_rule_raw, ParserContext};
+
+/// Shim matching the pre-`ParserContext` single-argument shape so the bulk
+/// of this test suite can stay unchanged. Individual tests that need a
+/// populated context (e.g. GEOIP with a real reader) can call
+/// `parse_rule_raw(..., &ctx)` directly.
+fn parse_rule(line: &str) -> Result<Box<dyn Rule>, String> {
+    parse_rule_raw(line, &ParserContext::empty())
+}
 
 fn helper() -> RuleMatchHelper {
-    RuleMatchHelper {
-        find_process: Box::new(|| {}),
-    }
+    RuleMatchHelper
 }
 
 fn meta(host: &str, dst_port: u16) -> Metadata {

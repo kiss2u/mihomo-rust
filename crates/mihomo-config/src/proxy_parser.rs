@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, DelayHistory, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+    AdapterType, DelayHistory, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
+    ProxyPacketConn, Result,
 };
 use mihomo_proxy::{FallbackGroup, SelectorGroup, ShadowsocksAdapter, TrojanAdapter, UrlTestGroup};
 use std::collections::HashMap;
@@ -37,23 +38,27 @@ impl ProxyAdapter for WrappedProxy {
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.adapter.dial_udp(metadata).await
     }
+
+    fn health(&self) -> &ProxyHealth {
+        self.adapter.health()
+    }
 }
 
 impl Proxy for WrappedProxy {
     fn alive(&self) -> bool {
-        true
+        self.adapter.health().alive()
     }
     fn alive_for_url(&self, _url: &str) -> bool {
-        true
+        self.adapter.health().alive()
     }
     fn last_delay(&self) -> u16 {
-        0
+        self.adapter.health().last_delay()
     }
     fn last_delay_for_url(&self, _url: &str) -> u16 {
-        0
+        self.adapter.health().last_delay()
     }
     fn delay_history(&self) -> Vec<DelayHistory> {
-        Vec::new()
+        self.adapter.health().delay_history()
     }
 }
 
@@ -164,13 +169,43 @@ pub fn parse_proxy_group(
     config: &crate::raw::RawProxyGroup,
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
+    parse_proxy_group_inner(config, existing_proxies, true)
+}
+
+/// Lenient variant: unknown members are warned and skipped rather than
+/// erroring out. Used by the multi-pass group loop on its final (stall) pass
+/// so groups that reference a truly-missing proxy still build with whatever
+/// members *did* resolve — matching upstream mihomo's warn-not-fail contract.
+pub fn parse_proxy_group_lenient(
+    config: &crate::raw::RawProxyGroup,
+    existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+) -> std::result::Result<Arc<dyn Proxy>, String> {
+    parse_proxy_group_inner(config, existing_proxies, false)
+}
+
+fn parse_proxy_group_inner(
+    config: &crate::raw::RawProxyGroup,
+    existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+    strict: bool,
+) -> std::result::Result<Arc<dyn Proxy>, String> {
     let proxy_names = config.proxies.as_deref().unwrap_or(&[]);
-    let mut proxies: Vec<Arc<dyn Proxy>> = Vec::new();
+    let mut proxies: Vec<Arc<dyn Proxy>> = Vec::with_capacity(proxy_names.len());
     for name in proxy_names {
-        if let Some(proxy) = existing_proxies.get(name.as_str()) {
-            proxies.push(proxy.clone());
-        } else {
-            tracing::warn!("Proxy '{}' not found for group '{}'", name, config.name);
+        match existing_proxies.get(name.as_str()) {
+            Some(proxy) => proxies.push(proxy.clone()),
+            None if strict => {
+                return Err(format!(
+                    "group '{}' references unknown proxy '{}'",
+                    config.name, name
+                ));
+            }
+            None => {
+                tracing::warn!(
+                    "Proxy '{}' not found for group '{}', skipping",
+                    name,
+                    config.name
+                );
+            }
         }
     }
 

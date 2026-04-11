@@ -18,7 +18,7 @@ use mihomo_common::{Metadata, Rule, RuleMatchHelper};
 use mihomo_trie::DomainTrie;
 use tracing::warn;
 
-use crate::parser::parse_rule;
+use crate::parser::{parse_rule, ParserContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleSetBehavior {
@@ -76,11 +76,19 @@ pub trait RuleSet: Send + Sync {
 }
 
 /// Build a rule-set of the given behavior from already-parsed entries.
-pub fn build_rule_set(behavior: RuleSetBehavior, entries: &[String]) -> Box<dyn RuleSet> {
+///
+/// `ctx` is only consulted when `behavior == Classical` (since classical
+/// rule-set entries are full rule lines that may include context-requiring
+/// types like GEOIP). Domain and IpCidr behaviors ignore it entirely.
+pub fn build_rule_set(
+    behavior: RuleSetBehavior,
+    entries: &[String],
+    ctx: &ParserContext,
+) -> Box<dyn RuleSet> {
     match behavior {
         RuleSetBehavior::Domain => Box::new(DomainRuleSet::from_entries(entries)),
         RuleSetBehavior::IpCidr => Box::new(IpCidrRuleSet::from_entries(entries)),
-        RuleSetBehavior::Classical => Box::new(ClassicalRuleSet::from_entries(entries)),
+        RuleSetBehavior::Classical => Box::new(ClassicalRuleSet::from_entries(entries, ctx)),
     }
 }
 
@@ -193,7 +201,7 @@ pub struct ClassicalRuleSet {
 }
 
 impl ClassicalRuleSet {
-    pub fn from_entries(entries: &[String]) -> Self {
+    pub fn from_entries(entries: &[String], ctx: &ParserContext) -> Self {
         let mut rules: Vec<Box<dyn Rule>> = Vec::new();
         for entry in entries {
             let entry = entry.trim();
@@ -206,7 +214,7 @@ impl ClassicalRuleSet {
             // the real adapter). A MATCH-only shorthand is unusual in
             // classical sets and would be meaningless anyway.
             let patched = splice_placeholder_adapter(entry);
-            match parse_rule(&patched) {
+            match parse_rule(&patched, ctx) {
                 Ok(rule) => rules.push(rule),
                 Err(e) => warn!("rule-set (classical): skipping '{}': {}", entry, e),
             }
@@ -255,9 +263,7 @@ mod tests {
     use mihomo_common::Metadata;
 
     fn helper() -> RuleMatchHelper {
-        RuleMatchHelper {
-            find_process: Box::new(|| {}),
-        }
+        RuleMatchHelper
     }
 
     fn meta_host(host: &str) -> Metadata {
@@ -297,10 +303,14 @@ mod tests {
 
     #[test]
     fn classical_rule_set_delegates_to_parser() {
-        let set = ClassicalRuleSet::from_entries(&[
-            "DOMAIN-SUFFIX,google.com".to_string(),
-            "IP-CIDR,10.0.0.0/8,no-resolve".to_string(),
-        ]);
+        let ctx = ParserContext::empty();
+        let set = ClassicalRuleSet::from_entries(
+            &[
+                "DOMAIN-SUFFIX,google.com".to_string(),
+                "IP-CIDR,10.0.0.0/8,no-resolve".to_string(),
+            ],
+            &ctx,
+        );
         assert_eq!(set.len(), 2);
         assert!(set.matches(&meta_host("mail.google.com"), &helper()));
         assert!(set.matches(&meta_ip("10.1.2.3"), &helper()));
@@ -309,7 +319,12 @@ mod tests {
 
     #[test]
     fn build_rule_set_dispatches_by_behavior() {
-        let set = build_rule_set(RuleSetBehavior::Domain, &["example.com".to_string()]);
+        let ctx = ParserContext::empty();
+        let set = build_rule_set(
+            RuleSetBehavior::Domain,
+            &["example.com".to_string()],
+            &ctx,
+        );
         assert_eq!(set.behavior(), RuleSetBehavior::Domain);
         assert_eq!(set.len(), 1);
     }

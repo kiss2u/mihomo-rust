@@ -19,10 +19,12 @@ impl Rule for ProcessRule {
         RuleType::ProcessName
     }
 
-    fn match_metadata(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> bool {
-        if metadata.process.is_empty() {
-            (helper.find_process)();
-        }
+    fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
+        // Process lookup is performed once in the tunnel match engine before
+        // rule iteration — see `mihomo_tunnel::match_engine::match_rules`. By
+        // the time we reach this rule `metadata.process` is either populated
+        // with the result of that lookup or empty if the lookup failed /
+        // wasn't attempted on this platform.
         metadata.process.eq_ignore_ascii_case(&self.process_name)
     }
 

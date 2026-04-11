@@ -10,6 +10,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::{debug, warn};
 
+/// Broadcast channel used to share a singleflight lookup result.
+/// Capacity 1 is enough — subscribers call `recv()` at most once.
+type InflightTx = tokio::sync::broadcast::Sender<Option<Vec<IpAddr>>>;
+
 pub struct Resolver {
     main: TokioResolver,
     fallback: Option<TokioResolver>,
@@ -17,9 +21,27 @@ pub struct Resolver {
     mode: DnsMode,
     // Policy: domain trie mapping to specific resolver index
     hosts: DomainTrie<Vec<IpAddr>>,
-    // In-flight dedup
-    #[allow(dead_code)]
-    inflight: DashMap<String, ()>,
+    /// Singleflight in-flight dedup: maps host → broadcast sender held by the
+    /// leader task. Subscribers receive the leader's result and never launch
+    /// their own hickory query.
+    inflight: DashMap<String, InflightTx>,
+}
+
+/// RAII guard that removes the inflight entry on drop, whether the leader
+/// completes normally or panics. Without this, a panicking leader would leave
+/// a dangling entry whose broadcast sender has been dropped — subsequent
+/// callers would subscribe, get `RecvError::Closed`, and the stale key would
+/// never be reaped.
+struct InflightGuard<'a> {
+    map: &'a DashMap<String, InflightTx>,
+    key: String,
+    _armed: (),
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.map.remove(&self.key);
+    }
 }
 
 fn clamp_ttl(raw: Duration) -> Duration {
@@ -129,7 +151,55 @@ impl Resolver {
         ips.into_iter().next()
     }
 
+    /// Singleflight wrapper around [`Self::do_lookup`]. The first caller for a
+    /// given host becomes the leader and launches one upstream query; any
+    /// concurrent callers subscribe to a broadcast channel and receive the
+    /// leader's result. An RAII guard removes the inflight entry on all exit
+    /// paths (including panics), so a panicking leader can't leak entries.
     async fn lookup_actual_all(&self, host: &str) -> Option<Vec<IpAddr>> {
+        use dashmap::mapref::entry::Entry;
+
+        // Fast path: another task is already resolving this host — subscribe
+        // and wait. `get()` takes a read lock which we drop before awaiting
+        // to avoid blocking other DashMap shards. `recv()` returning Err
+        // means the leader's sender was dropped without sending (panic or
+        // task cancellation) — fall through to None, matching the "lookup
+        // failed" contract.
+        if let Some(entry) = self.inflight.get(host) {
+            let mut rx = entry.subscribe();
+            drop(entry);
+            return rx.recv().await.ok().flatten();
+        }
+
+        // Slow path: try to become the leader. The entry API closes the race
+        // where two tasks both observed the map as empty above.
+        let tx = match self.inflight.entry(host.to_string()) {
+            Entry::Occupied(existing) => {
+                let mut rx = existing.get().subscribe();
+                drop(existing);
+                return rx.recv().await.ok().flatten();
+            }
+            Entry::Vacant(v) => {
+                let (tx, _) = tokio::sync::broadcast::channel(1);
+                v.insert(tx.clone());
+                tx
+            }
+        };
+
+        let _guard = InflightGuard {
+            map: &self.inflight,
+            key: host.to_string(),
+            _armed: (),
+        };
+
+        let result = self.do_lookup(host).await;
+        // Subscribers may have all dropped by now; send error is not
+        // actionable and there's nothing to do about it.
+        let _ = tx.send(result.clone());
+        result
+    }
+
+    async fn do_lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
         debug!("DNS lookup: {}", host);
 
         // Try main resolver
@@ -235,5 +305,42 @@ mod tests {
             clamp_ttl(Duration::from_secs(99_999)),
             Duration::from_secs(3600)
         );
+    }
+
+    #[tokio::test]
+    async fn inflight_entry_cleared_after_lookup_miss() {
+        // No nameservers → lookup_actual_all returns None quickly. After it
+        // returns, the inflight map must not retain the host key.
+        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts);
+        let _ = resolver.lookup_actual_all("nonexistent.test").await;
+        assert!(
+            resolver.inflight.is_empty(),
+            "inflight map must be empty after lookup, had {} entries",
+            resolver.inflight.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn inflight_concurrent_callers_share_one_lookup() {
+        // Two concurrent callers for the same host should collapse into a
+        // single upstream lookup. With zero nameservers both branches of
+        // `lookup_actual_all` return None; the test verifies (a) both calls
+        // return the same result, (b) the map is clean on exit.
+        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let resolver = std::sync::Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            hosts,
+        ));
+        let r1 = resolver.clone();
+        let r2 = resolver.clone();
+        let (a, b) = tokio::join!(
+            r1.lookup_actual_all("concurrent.test"),
+            r2.lookup_actual_all("concurrent.test"),
+        );
+        assert_eq!(a, b, "concurrent callers must see the same result");
+        assert!(resolver.inflight.is_empty());
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use mihomo_common::Rule;
 
 use crate::domain::DomainRule;
@@ -5,12 +7,42 @@ use crate::domain_keyword::DomainKeywordRule;
 use crate::domain_regex::DomainRegexRule;
 use crate::domain_suffix::DomainSuffixRule;
 use crate::final_rule::FinalRule;
+use crate::geoip::GeoIpRule;
 use crate::ipcidr::IpCidrRule;
+use crate::logic::{AndRule, NotRule, OrRule};
 use crate::network::NetworkRule;
 use crate::port::PortRule;
 use crate::process::ProcessRule;
 
-pub fn parse_rule(line: &str) -> Result<Box<dyn Rule>, String> {
+/// Shared context for `parse_rule` — carries resources that context-requiring
+/// rule types (today: GEOIP; later: GeoSite, IP-ASN) need in order to build
+/// themselves. Callers that don't use any such rule types can pass
+/// [`ParserContext::empty`].
+#[derive(Clone, Debug, Default)]
+pub struct ParserContext {
+    /// Optional GeoIP (Country) MaxMindDB reader, shared across all GEOIP
+    /// rules built through this context. `None` means GEOIP rules cannot be
+    /// constructed and will parse-fail with a "no reader configured" error.
+    pub geoip: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+}
+
+impl ParserContext {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, String> {
+    // Logic rules (AND/OR/NOT) must be detected before the naive `splitn(4, ',')`
+    // below, because their payloads contain parenthesised sub-rules whose
+    // commas would be split incorrectly.
+    if let Some((ty, rest)) = split_once_trimmed(line, ',') {
+        let upper = ty.to_ascii_uppercase();
+        if matches!(upper.as_str(), "AND" | "OR" | "NOT") {
+            return parse_logic_rule(&upper, rest, ctx);
+        }
+    }
+
     let parts: Vec<&str> = line.splitn(4, ',').collect();
     if parts.len() < 2 {
         return Err(format!("invalid rule: {}", line));
@@ -55,10 +87,160 @@ pub fn parse_rule(line: &str) -> Result<Box<dyn Rule>, String> {
         "DST-PORT" => PortRule::new(payload, adapter, false).map(|r| Box::new(r) as Box<dyn Rule>),
         "NETWORK" => NetworkRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "PROCESS-NAME" => Ok(Box::new(ProcessRule::new(payload, adapter))),
-        // GEOIP needs a reader, so it can't be parsed from a simple string.
-        // It should be constructed via GeoIpRule::new() directly with the reader.
-        "GEOIP" => Err("GEOIP rules need a maxminddb reader; use GeoIpRule::new() directly".into()),
+        "GEOIP" => {
+            let reader = ctx.geoip.clone().ok_or_else(|| {
+                "GEOIP rule requires a GeoIP database, but none is configured".to_string()
+            })?;
+            let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            Ok(Box::new(GeoIpRule::new(payload, adapter, no_resolve, reader)))
+        }
         _ => Err(format!("unknown rule type: {}", rule_type)),
+    }
+}
+
+fn split_once_trimmed(s: &str, sep: char) -> Option<(&str, &str)> {
+    s.split_once(sep).map(|(l, r)| (l.trim(), r.trim_start()))
+}
+
+/// Parse `AND,((r1),(r2),...),ADAPTER` / `OR,(...)`, / `NOT,((r1)),ADAPTER`.
+/// `rule_type` is already upper-cased; `rest` is the line content after the
+/// leading `TYPE,`.
+fn parse_logic_rule(
+    rule_type: &str,
+    rest: &str,
+    ctx: &ParserContext,
+) -> Result<Box<dyn Rule>, String> {
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Err(format!(
+            "{} rule: expected '(' after rule type, got: {}",
+            rule_type, rest
+        ));
+    }
+    // Find the matching ')' for the outer group-list parenthesis.
+    let mut depth: i32 = 0;
+    let mut end: Option<usize> = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.ok_or_else(|| format!("{} rule: unbalanced parentheses", rule_type))?;
+    let inner = &rest[1..end];
+    let tail = rest[end + 1..].trim_start();
+    let adapter = tail
+        .strip_prefix(',')
+        .ok_or_else(|| format!("{} rule: expected ',ADAPTER' after payload", rule_type))?
+        .trim();
+    if adapter.is_empty() {
+        return Err(format!("{} rule: missing adapter", rule_type));
+    }
+
+    let groups = split_logic_groups(inner)
+        .map_err(|e| format!("{} rule: {}", rule_type, e))?;
+    if groups.is_empty() {
+        return Err(format!("{} rule: empty payload", rule_type));
+    }
+
+    let mut inner_rules: Vec<Box<dyn Rule>> = Vec::with_capacity(groups.len());
+    for g in &groups {
+        let patched = splice_inner_adapter(g.trim());
+        inner_rules.push(parse_rule(&patched, ctx)?);
+    }
+
+    match rule_type {
+        "AND" => Ok(Box::new(AndRule::new(inner_rules, adapter))),
+        "OR" => Ok(Box::new(OrRule::new(inner_rules, adapter))),
+        "NOT" => {
+            if inner_rules.len() != 1 {
+                return Err(format!(
+                    "NOT rule requires exactly 1 inner rule, got {}",
+                    inner_rules.len()
+                ));
+            }
+            Ok(Box::new(NotRule::new(
+                inner_rules.into_iter().next().unwrap(),
+                adapter,
+            )))
+        }
+        _ => unreachable!("caller upper-cased rule_type"),
+    }
+}
+
+/// Split the body of a logic payload — a sequence of `(...)` groups optionally
+/// separated by commas — into the string contents of each group, preserving
+/// balanced parens inside.
+fn split_logic_groups(inner: &str) -> Result<Vec<String>, String> {
+    let mut groups = Vec::new();
+    let mut chars = inner.char_indices().peekable();
+    loop {
+        while let Some(&(_, c)) = chars.peek() {
+            if c == ' ' || c == ',' {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let Some(&(_, c)) = chars.peek() else { break };
+        if c != '(' {
+            return Err(format!("expected '(' starting a group, got '{}'", c));
+        }
+        chars.next(); // consume '('
+        let start = chars.peek().map(|&(i, _)| i).unwrap_or(inner.len());
+        let mut depth = 1i32;
+        let mut end: Option<usize> = None;
+        for (i, c) in chars.by_ref() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.ok_or_else(|| "unbalanced parentheses in logic payload".to_string())?;
+        groups.push(inner[start..end].to_string());
+    }
+    Ok(groups)
+}
+
+/// Splice a placeholder adapter into `TYPE,PAYLOAD[,extra]` so the inner rule
+/// satisfies `parse_rule`'s `TYPE,PAYLOAD,ADAPTER[,extra]` shape. The owning
+/// logic/rule-set wrapper carries the real adapter; the placeholder is
+/// discarded at match time.
+fn splice_inner_adapter(entry: &str) -> String {
+    const PLACEHOLDER: &str = "LOGIC-INNER-PLACEHOLDER";
+    // Logic sub-rules carry their own parenthesised payload that must not be
+    // split on commas — their "adapter" slot is appended at the end.
+    if let Some((ty, _)) = entry.split_once(',') {
+        let upper = ty.trim().to_ascii_uppercase();
+        if matches!(upper.as_str(), "AND" | "OR" | "NOT") {
+            return format!("{},{}", entry, PLACEHOLDER);
+        }
+    }
+    let parts: Vec<&str> = entry.splitn(3, ',').collect();
+    match parts.as_slice() {
+        [ty, payload] => format!("{},{},{}", ty.trim(), payload.trim(), PLACEHOLDER),
+        [ty, payload, rest] => format!(
+            "{},{},{},{}",
+            ty.trim(),
+            payload.trim(),
+            PLACEHOLDER,
+            rest.trim()
+        ),
+        _ => entry.to_string(),
     }
 }
 
@@ -68,9 +250,11 @@ mod tests {
     use mihomo_common::{Metadata, RuleMatchHelper};
 
     fn noop_helper() -> RuleMatchHelper {
-        RuleMatchHelper {
-            find_process: Box::new(|| {}),
-        }
+        RuleMatchHelper
+    }
+
+    fn ctx() -> ParserContext {
+        ParserContext::empty()
     }
 
     fn make_metadata(host: &str, dst_port: u16) -> Metadata {
@@ -83,14 +267,14 @@ mod tests {
 
     #[test]
     fn test_parse_domain() {
-        let rule = parse_rule("DOMAIN,google.com,Proxy").unwrap();
+        let rule = parse_rule("DOMAIN,google.com,Proxy", &ctx()).unwrap();
         let meta = make_metadata("google.com", 443);
         assert!(rule.match_metadata(&meta, &noop_helper()));
     }
 
     #[test]
     fn test_parse_domain_suffix() {
-        let rule = parse_rule("DOMAIN-SUFFIX,google.com,Proxy").unwrap();
+        let rule = parse_rule("DOMAIN-SUFFIX,google.com,Proxy", &ctx()).unwrap();
         let meta = make_metadata("www.google.com", 443);
         assert!(rule.match_metadata(&meta, &noop_helper()));
         let meta2 = make_metadata("google.com", 443);
@@ -99,14 +283,14 @@ mod tests {
 
     #[test]
     fn test_parse_match() {
-        let rule = parse_rule("MATCH,DIRECT").unwrap();
+        let rule = parse_rule("MATCH,DIRECT", &ctx()).unwrap();
         let meta = make_metadata("anything.com", 80);
         assert!(rule.match_metadata(&meta, &noop_helper()));
     }
 
     #[test]
     fn test_parse_port() {
-        let rule = parse_rule("DST-PORT,80,DIRECT").unwrap();
+        let rule = parse_rule("DST-PORT,80,DIRECT", &ctx()).unwrap();
         let meta = make_metadata("example.com", 80);
         assert!(rule.match_metadata(&meta, &noop_helper()));
         let meta2 = make_metadata("example.com", 443);
@@ -115,9 +299,100 @@ mod tests {
 
     #[test]
     fn test_parse_ip_cidr() {
-        let rule = parse_rule("IP-CIDR,192.168.1.0/24,DIRECT,no-resolve").unwrap();
+        let rule = parse_rule("IP-CIDR,192.168.1.0/24,DIRECT,no-resolve", &ctx()).unwrap();
         let mut meta = make_metadata("", 80);
         meta.dst_ip = Some("192.168.1.100".parse().unwrap());
         assert!(rule.match_metadata(&meta, &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_and_rule() {
+        let rule = parse_rule(
+            "AND,((DOMAIN-SUFFIX,example.com),(DST-PORT,443)),Proxy",
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(rule.adapter(), "Proxy");
+        let hit = make_metadata("www.example.com", 443);
+        let miss_port = make_metadata("www.example.com", 80);
+        let miss_host = make_metadata("other.com", 443);
+        assert!(rule.match_metadata(&hit, &noop_helper()));
+        assert!(!rule.match_metadata(&miss_port, &noop_helper()));
+        assert!(!rule.match_metadata(&miss_host, &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_or_rule() {
+        let rule = parse_rule(
+            "OR,((DOMAIN,a.com),(DOMAIN,b.com)),DIRECT",
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(rule.adapter(), "DIRECT");
+        assert!(rule.match_metadata(&make_metadata("a.com", 80), &noop_helper()));
+        assert!(rule.match_metadata(&make_metadata("b.com", 80), &noop_helper()));
+        assert!(!rule.match_metadata(&make_metadata("c.com", 80), &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_not_rule() {
+        let rule = parse_rule("NOT,((DOMAIN-SUFFIX,corp.example)),DIRECT", &ctx()).unwrap();
+        assert_eq!(rule.adapter(), "DIRECT");
+        assert!(!rule.match_metadata(&make_metadata("host.corp.example", 80), &noop_helper()));
+        assert!(rule.match_metadata(&make_metadata("other.com", 80), &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_logic_nested() {
+        // AND containing an OR and a NOT.
+        let rule = parse_rule(
+            "AND,((OR,((DOMAIN,a.com),(DOMAIN,b.com))),(NOT,((DST-PORT,80)))),Proxy",
+            &ctx(),
+        )
+        .unwrap();
+        assert!(rule.match_metadata(&make_metadata("a.com", 443), &noop_helper()));
+        assert!(rule.match_metadata(&make_metadata("b.com", 443), &noop_helper()));
+        assert!(!rule.match_metadata(&make_metadata("a.com", 80), &noop_helper()));
+        assert!(!rule.match_metadata(&make_metadata("c.com", 443), &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_logic_inner_with_flag() {
+        // IP-CIDR inner rule carrying its own `no-resolve` flag — splicing must
+        // insert the placeholder before the flag, not after it.
+        let rule = parse_rule(
+            "AND,((IP-CIDR,192.168.0.0/16,no-resolve),(DST-PORT,443)),DIRECT",
+            &ctx(),
+        )
+        .unwrap();
+        let mut meta = make_metadata("", 443);
+        meta.dst_ip = Some("192.168.1.5".parse().unwrap());
+        assert!(rule.match_metadata(&meta, &noop_helper()));
+    }
+
+    #[test]
+    fn test_parse_not_requires_single_inner() {
+        let err = parse_rule("NOT,((DOMAIN,a.com),(DOMAIN,b.com)),DIRECT", &ctx())
+            .err()
+            .expect("NOT with multiple inner rules must error");
+        assert!(err.contains("NOT"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_parse_and_missing_adapter_errors() {
+        let err = parse_rule("AND,((DOMAIN,a.com))", &ctx())
+            .err()
+            .expect("missing adapter must error");
+        assert!(err.contains("adapter") || err.contains("ADAPTER"));
+    }
+
+    #[test]
+    fn test_parse_geoip_without_reader_errors() {
+        let result = parse_rule("GEOIP,CN,Proxy", &ctx());
+        let err = match result {
+            Ok(_) => panic!("GEOIP parsing must error when no reader is configured"),
+            Err(e) => e,
+        };
+        assert!(err.contains("GEOIP"), "unexpected error: {}", err);
     }
 }

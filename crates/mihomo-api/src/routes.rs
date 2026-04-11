@@ -1,7 +1,8 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::Json,
+    extract::{Path, Query, Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -10,26 +11,69 @@ use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinSet;
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::ui;
 
 pub struct AppState {
     pub tunnel: Tunnel,
-    #[allow(dead_code)]
+    /// Optional Bearer token enforced by `require_auth`. `None` or empty disables auth.
     pub secret: Option<String>,
     pub config_path: String,
     pub raw_config: Arc<RwLock<RawConfig>>,
 }
 
+impl AppState {
+    fn auth_required(&self) -> bool {
+        self.secret.as_deref().is_some_and(|s| !s.is_empty())
+    }
+}
+
+/// Bearer token middleware. Matches upstream mihomo contract:
+/// `Authorization: Bearer <secret>`. When the configured secret is empty or
+/// unset, the middleware is a no-op. Otherwise, requests without a matching
+/// header return `401 Unauthorized`.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !state.auth_required() {
+        return next.run(req).await;
+    }
+
+    let Some(expected) = state.secret.as_deref() else {
+        return next.run(req).await;
+    };
+
+    let provided = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+
+    match provided {
+        Some(token) if token == expected => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+    }
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // API routes gated behind the Bearer middleware. When the configured
+    // secret is empty/None the middleware short-circuits, so tests and
+    // unauthenticated deployments continue to work.
+    let api = Router::new()
         .route("/", get(hello))
         .route("/version", get(version))
         .route("/proxies", get(get_proxies))
         .route("/proxies/{name}", get(get_proxy).put(update_proxy))
+        .route("/proxies/{name}/delay", get(get_proxy_delay))
+        .route("/group/{name}/delay", get(get_group_delay))
         .route(
             "/rules",
             get(get_rules).post(replace_rules).put(update_rule_at_index),
@@ -66,9 +110,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/proxy-groups/{name}/select",
             put(select_proxy_in_group),
         )
-        // Web UI
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
+
+    // Web UI is intentionally unauthenticated so dashboards can load and then
+    // present a token prompt; this matches upstream mihomo behaviour.
+    let ui = Router::new()
         .route("/ui", get(ui::serve_ui))
-        .route("/ui/{*rest}", get(ui::serve_ui))
+        .route("/ui/{*rest}", get(ui::serve_ui));
+
+    api.merge(ui)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -100,6 +153,35 @@ struct ProxyInfo {
     alive: bool,
     history: Vec<mihomo_common::DelayHistory>,
     udp: bool,
+    /// Group-only: ordered list of member proxy names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    all: Option<Vec<String>>,
+    /// Group-only: name of the currently active member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    now: Option<String>,
+}
+
+impl ProxyInfo {
+    fn from_proxy(proxy: &Arc<dyn mihomo_common::Proxy>) -> Self {
+        let members = proxy.members();
+        let current = proxy.current();
+        debug!(
+            name = proxy.name(),
+            proxy_type = %proxy.adapter_type(),
+            member_count = members.as_ref().map(|v| v.len()),
+            current = ?current,
+            "building ProxyInfo",
+        );
+        Self {
+            name: proxy.name().to_string(),
+            proxy_type: proxy.adapter_type().to_string(),
+            alive: proxy.alive(),
+            history: proxy.delay_history(),
+            udp: proxy.support_udp(),
+            all: members,
+            now: current,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -111,16 +193,7 @@ async fn get_proxies(State(state): State<Arc<AppState>>) -> Json<ProxiesResponse
     let proxies = state.tunnel.proxies();
     let mut result = std::collections::HashMap::new();
     for (name, proxy) in &proxies {
-        result.insert(
-            name.clone(),
-            ProxyInfo {
-                name: proxy.name().to_string(),
-                proxy_type: proxy.adapter_type().to_string(),
-                alive: proxy.alive(),
-                history: proxy.delay_history(),
-                udp: proxy.support_udp(),
-            },
-        );
+        result.insert(name.clone(), ProxyInfo::from_proxy(proxy));
     }
     Json(ProxiesResponse { proxies: result })
 }
@@ -131,13 +204,7 @@ async fn get_proxy(
 ) -> Result<Json<ProxyInfo>, StatusCode> {
     let proxies = state.tunnel.proxies();
     let proxy = proxies.get(&name).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(ProxyInfo {
-        name: proxy.name().to_string(),
-        proxy_type: proxy.adapter_type().to_string(),
-        alive: proxy.alive(),
-        history: proxy.delay_history(),
-        udp: proxy.support_udp(),
-    }))
+    Ok(Json(ProxyInfo::from_proxy(proxy)))
 }
 
 #[derive(Deserialize)]
@@ -325,8 +392,9 @@ async fn save_config(
 // ── Helper: rebuild proxies/rules from raw and apply to tunnel ───────
 
 fn apply_raw_to_tunnel(raw: &RawConfig, tunnel: &Tunnel) -> Result<(), (StatusCode, String)> {
-    let (proxies, rules) = mihomo_config::rebuild_from_raw(raw)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (proxies, rules) =
+        mihomo_config::rebuild_from_raw_with_resolver(raw, Some(tunnel.resolver().clone()))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
     Ok(())
@@ -716,4 +784,159 @@ async fn reorder_rules(
     rules.insert(body.to, rule);
     apply_raw_to_tunnel(&raw, &state.tunnel)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Delay probe endpoints ────────────────────────────────────────────
+//
+// Matches upstream mihomo `hub/route/proxies.go::getProxyDelay` and
+// `hub/route/groups.go::getGroupDelay`. Error bodies are byte-exact copies
+// of upstream's `ErrBadRequest` / `ErrNotFound` / `ErrRequestTimeout` /
+// `newError("An error occurred in the delay test")`.
+
+#[derive(Deserialize)]
+struct DelayParams {
+    url: Option<String>,
+    timeout: Option<String>,
+    #[allow(dead_code)]
+    expected: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DelayResp {
+    delay: u16,
+}
+
+/// `{"message": "..."}` body matching upstream's error render.
+fn msg_err(status: StatusCode, message: &'static str) -> Response {
+    (status, Json(serde_json::json!({ "message": message }))).into_response()
+}
+
+/// Validate `url` and `timeout`. Returns `timeout` as `Duration` on success,
+/// or the `400 Body invalid` response on any validation failure — matching
+/// upstream's single "ErrBadRequest" shape for all parse errors.
+fn parse_delay_params(params: &DelayParams) -> Result<Duration, Response> {
+    // upstream: hub/route/proxies.go::getProxyDelay — url is not strictly
+    // validated upstream, but an empty host would panic our prober.
+    let url = params.url.as_deref().unwrap_or("").trim();
+    if url.is_empty() {
+        return Err(msg_err(StatusCode::BAD_REQUEST, "Body invalid"));
+    }
+
+    // upstream parses `timeout` as int16 and treats parse failure as
+    // ErrBadRequest. We reject 0 as well (a zero-budget probe is never useful).
+    let timeout_str = params
+        .timeout
+        .as_deref()
+        .ok_or_else(|| msg_err(StatusCode::BAD_REQUEST, "Body invalid"))?;
+    let timeout_ms: u16 = timeout_str
+        .trim()
+        .parse()
+        .map_err(|_| msg_err(StatusCode::BAD_REQUEST, "Body invalid"))?;
+    if timeout_ms == 0 {
+        return Err(msg_err(StatusCode::BAD_REQUEST, "Body invalid"));
+    }
+    Ok(Duration::from_millis(timeout_ms as u64))
+}
+
+/// Probe a single adapter and record the result into its health handle.
+/// Returns the measured delay (may be `0` on transport failure / timeout —
+/// caller decides how to surface that).
+async fn probe_and_record(proxy: &Arc<dyn mihomo_common::Proxy>, url: &str, timeout: Duration) -> u16 {
+    let adapter: &dyn mihomo_common::ProxyAdapter = proxy.as_ref();
+    let delay = mihomo_proxy::health::url_test(adapter, url, timeout).await;
+    proxy.health().record_delay(delay);
+    delay
+}
+
+async fn get_proxy_delay(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<DelayParams>,
+) -> Response {
+    let timeout = match parse_delay_params(&params) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let url = params.url.as_deref().unwrap_or("").to_string();
+
+    let proxies = state.tunnel.proxies();
+    // upstream: hub/route/proxies.go::getProxyDelay — findProxyByName middleware
+    let Some(proxy) = proxies.get(&name).cloned() else {
+        return msg_err(StatusCode::NOT_FOUND, "resource not found");
+    };
+    drop(proxies);
+
+    let delay = probe_and_record(&proxy, &url, timeout).await;
+    if delay == 0 {
+        // upstream: `newError("An error occurred in the delay test")` → 503.
+        // `url_test` collapses both "timeout elapsed" and "transport error"
+        // into delay == 0; we prefer the transport-error code (503) over the
+        // timeout code (504) here because distinguishing them would require
+        // threading the outcome through `url_test`. M1.G-2b (task #29) is the
+        // right place to split them when it upgrades the prober to a real GET.
+        return msg_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "An error occurred in the delay test",
+        );
+    }
+    Json(DelayResp { delay }).into_response()
+}
+
+async fn get_group_delay(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<DelayParams>,
+) -> Response {
+    let timeout = match parse_delay_params(&params) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let url = params.url.as_deref().unwrap_or("").to_string();
+
+    let proxies = state.tunnel.proxies();
+    let Some(group) = proxies.get(&name).cloned() else {
+        return msg_err(StatusCode::NOT_FOUND, "resource not found");
+    };
+    // upstream: findProxyByName rejects non-groups with 404 for this route.
+    let Some(member_names) = group.members() else {
+        return msg_err(StatusCode::NOT_FOUND, "resource not found");
+    };
+
+    // Resolve each member name to an `Arc<dyn Proxy>` *before* dropping the
+    // proxies map so the spawned tasks hold their own Arc clones.
+    let members: Vec<(String, Arc<dyn mihomo_common::Proxy>)> = member_names
+        .into_iter()
+        .filter_map(|n| proxies.get(&n).cloned().map(|p| (n, p)))
+        .collect();
+    drop(proxies);
+
+    let url_shared = Arc::new(url);
+    let mut set: JoinSet<(String, u16)> = JoinSet::new();
+    for (member_name, proxy) in members {
+        let url = url_shared.clone();
+        set.spawn(async move {
+            let delay = probe_and_record(&proxy, &url, timeout).await;
+            (member_name, delay)
+        });
+    }
+
+    // upstream: group probe wraps the whole JoinSet in one context.WithTimeout,
+    // not per-member. A slow member does not get its own budget.
+    let mut result: BTreeMap<String, u16> = BTreeMap::new();
+    let collected = tokio::time::timeout(timeout, async {
+        while let Some(join) = set.join_next().await {
+            if let Ok((member_name, delay)) = join {
+                result.insert(member_name, delay);
+            }
+        }
+    })
+    .await;
+
+    if collected.is_err() {
+        // upstream: 504 "Timeout". Even if some members completed before the
+        // deadline, upstream still returns the timeout error — we match.
+        set.abort_all();
+        return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
+    }
+    Json(result).into_response()
 }

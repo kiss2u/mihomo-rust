@@ -1,23 +1,83 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn,
+    Result,
 };
-use std::net::SocketAddr;
+use mihomo_dns::Resolver;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use tokio::net::{TcpStream, UdpSocket};
 
 pub struct DirectAdapter {
     routing_mark: Option<u32>,
+    /// Optional internal DNS resolver. When set, `dial_tcp` resolves
+    /// hostnames via this resolver instead of the OS resolver — this is
+    /// important when mihomo *is* the system DNS, because routing a direct
+    /// DNS query back through the OS would loop the query back into mihomo.
+    resolver: Option<Arc<Resolver>>,
+    health: ProxyHealth,
 }
 
 impl DirectAdapter {
     pub fn new() -> Self {
-        Self { routing_mark: None }
+        Self {
+            routing_mark: None,
+            resolver: None,
+            health: ProxyHealth::new(),
+        }
     }
 
-    pub fn with_routing_mark(routing_mark: u32) -> Self {
-        Self {
-            routing_mark: Some(routing_mark),
+    pub fn with_routing_mark(mut self, routing_mark: u32) -> Self {
+        self.routing_mark = Some(routing_mark);
+        self
+    }
+
+    pub fn with_resolver(mut self, resolver: Arc<Resolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// Determine the concrete `SocketAddr` to dial for `metadata`, avoiding
+    /// the OS resolver whenever possible.
+    async fn resolve_target(&self, metadata: &Metadata) -> Result<SocketAddr> {
+        // 1. Destination already resolved (e.g. by rule-matching pre_resolve,
+        //    or when the client supplied an IP literal).
+        if let Some(ip) = metadata.dst_ip {
+            return Ok(SocketAddr::new(ip, metadata.dst_port));
         }
+
+        // 2. `host` is an IP literal — no DNS needed.
+        if let Ok(ip) = metadata.host.parse::<IpAddr>() {
+            return Ok(SocketAddr::new(ip, metadata.dst_port));
+        }
+
+        // 3. Resolve via mihomo's internal resolver if available. Falls back
+        //    to the OS resolver only when no resolver was injected (tests,
+        //    standalone usage).
+        if !metadata.host.is_empty() {
+            if let Some(resolver) = &self.resolver {
+                return match resolver.resolve_ip(&metadata.host).await {
+                    Some(ip) => Ok(SocketAddr::new(ip, metadata.dst_port)),
+                    None => Err(MihomoError::Dns(format!(
+                        "direct: failed to resolve {}",
+                        metadata.host
+                    ))),
+                };
+            }
+
+            // Legacy fallback: let tokio use getaddrinfo. Only reachable when
+            // no resolver was injected — production code paths always inject.
+            let addr = format!("{}:{}", metadata.host, metadata.dst_port);
+            return tokio::net::lookup_host(&addr)
+                .await
+                .map_err(MihomoError::Io)?
+                .next()
+                .ok_or_else(|| MihomoError::Dns(format!("direct: no address for {}", addr)));
+        }
+
+        Err(MihomoError::Proxy(
+            "direct: metadata has no destination".into(),
+        ))
     }
 }
 
@@ -91,16 +151,13 @@ impl ProxyPacketConn for DirectPacketConn {
 
 /// Create a TCP socket with an optional routing mark (SO_MARK on Linux)
 /// set BEFORE connecting, so the SYN packet is already marked.
-async fn connect_with_mark(addr: &str, routing_mark: Option<u32>) -> std::io::Result<TcpStream> {
+async fn connect_with_mark(
+    dest: SocketAddr,
+    routing_mark: Option<u32>,
+) -> std::io::Result<TcpStream> {
     #[cfg(target_os = "linux")]
     if let Some(mark) = routing_mark {
         use socket2::{Domain, Protocol, Socket, Type};
-        use std::net::ToSocketAddrs;
-
-        let dest: SocketAddr = addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| std::io::Error::other("could not resolve address"))?;
 
         let domain = if dest.is_ipv4() {
             Domain::IPV4
@@ -125,7 +182,7 @@ async fn connect_with_mark(addr: &str, routing_mark: Option<u32>) -> std::io::Re
     #[cfg(not(target_os = "linux"))]
     let _ = routing_mark;
 
-    TcpStream::connect(addr).await
+    TcpStream::connect(dest).await
 }
 
 #[async_trait]
@@ -147,8 +204,8 @@ impl ProxyAdapter for DirectAdapter {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        let addr = metadata.remote_address();
-        let stream = connect_with_mark(&addr, self.routing_mark)
+        let dest = self.resolve_target(metadata).await?;
+        let stream = connect_with_mark(dest, self.routing_mark)
             .await
             .map_err(MihomoError::Io)?;
         Ok(Box::new(DirectConn(stream)))
@@ -159,5 +216,9 @@ impl ProxyAdapter for DirectAdapter {
             .await
             .map_err(MihomoError::Io)?;
         Ok(Box::new(DirectPacketConn(socket)))
+    }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
     }
 }

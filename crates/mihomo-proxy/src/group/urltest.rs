@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn,
+    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, Result,
 };
 use parking_lot::RwLock;
@@ -11,6 +11,7 @@ pub struct UrlTestGroup {
     proxies: Vec<Arc<dyn Proxy>>,
     tolerance: u16,
     fastest: RwLock<usize>,
+    health: ProxyHealth,
 }
 
 impl UrlTestGroup {
@@ -20,6 +21,7 @@ impl UrlTestGroup {
             proxies,
             tolerance,
             fastest: RwLock::new(0),
+            health: ProxyHealth::new(),
         }
     }
 
@@ -92,6 +94,10 @@ impl ProxyAdapter for UrlTestGroup {
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
         self.fastest_proxy()
     }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
+    }
 }
 
 impl Proxy for UrlTestGroup {
@@ -117,5 +123,13 @@ impl Proxy for UrlTestGroup {
         self.fastest_proxy()
             .map(|p| p.delay_history())
             .unwrap_or_default()
+    }
+
+    fn members(&self) -> Option<Vec<String>> {
+        Some(self.proxies.iter().map(|p| p.name().to_string()).collect())
+    }
+
+    fn current(&self) -> Option<String> {
+        self.fastest_proxy().map(|p| p.name().to_string())
     }
 }

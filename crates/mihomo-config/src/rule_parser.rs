@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mihomo_common::Rule;
-use mihomo_rules::{RuleSet, RuleSetRule};
+use mihomo_rules::{ParserContext, RuleSet, RuleSetRule};
 use tracing::warn;
 
 /// Parse rules with no rule-providers available. Equivalent to
 /// `parse_rules_with_providers` with an empty map.
-pub fn parse_rules(raw_rules: &[String]) -> Vec<Box<dyn Rule>> {
-    parse_rules_with_providers(raw_rules, &HashMap::new())
+pub fn parse_rules(raw_rules: &[String], ctx: &ParserContext) -> Vec<Box<dyn Rule>> {
+    parse_rules_with_providers(raw_rules, &HashMap::new(), ctx)
 }
 
 /// Parse the `rules:` block, resolving `RULE-SET,<name>,...` entries against
@@ -17,6 +17,7 @@ pub fn parse_rules(raw_rules: &[String]) -> Vec<Box<dyn Rule>> {
 pub fn parse_rules_with_providers(
     raw_rules: &[String],
     providers: &HashMap<String, Arc<dyn RuleSet>>,
+    ctx: &ParserContext,
 ) -> Vec<Box<dyn Rule>> {
     let mut rules: Vec<Box<dyn Rule>> = Vec::new();
     for line in raw_rules {
@@ -34,7 +35,7 @@ pub fn parse_rules_with_providers(
             continue;
         }
 
-        match mihomo_rules::parse_rule(line) {
+        match mihomo_rules::parse_rule(line, ctx) {
             Ok(rule) => rules.push(rule),
             Err(e) => warn!("Failed to parse rule '{}': {}", line, e),
         }

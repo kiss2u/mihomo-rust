@@ -2,6 +2,7 @@
 name = "mihomo-config"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mihomo-common = { workspace = true }
@@ -18,6 +19,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
+maxminddb = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

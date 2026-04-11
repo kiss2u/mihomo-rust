@@ -134,7 +134,7 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 
 ### Build
 
-Requires Rust 1.70+.
+Requires Rust 1.88+ (the workspace pins `rust-version = "1.88"` and CI enforces it via a dedicated MSRV job).
 
 ```bash
 cargo build --release

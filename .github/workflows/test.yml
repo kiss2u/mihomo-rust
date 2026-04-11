@@ -101,6 +101,86 @@ jobs:
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
 
+      - name: v2ray-plugin integration tests
+        run: cargo test --test v2ray_plugin_integration -- --nocapture
+
+      - name: DNS pre-resolve tests
+        run: cargo test --test pre_resolve_test -- --nocapture
+
+  msrv:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read MSRV from workspace Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+          echo "MSRV: $msrv"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: msrv-${{ steps.msrv.outputs.version }}
+
+      - name: Cargo check on MSRV toolchain
+        run: cargo check --workspace --all-targets
+
+  macos:
+    runs-on: macos-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: macos
+
+      - name: Build
+        run: cargo build --tests
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Common types tests
+        run: cargo test --test common_test -- --nocapture
+
+      - name: DNS cache tests
+        run: cargo test --test dns_cache_test -- --nocapture
+
+      - name: Config parsing tests
+        run: cargo test --test config_test -- --nocapture
+
+      - name: Config persistence tests
+        run: cargo test --test config_persistence_test -- --nocapture
+
+      - name: Statistics tests
+        run: cargo test --test statistics_test -- --nocapture
+
+      - name: Rules tests
+        run: cargo test --test rules_test -- --nocapture
+
+      - name: API integration tests
+        run: cargo test --test api_test -- --nocapture
+
+      - name: Trojan integration tests
+        run: cargo test --test trojan_integration -- --nocapture
+
+      - name: v2ray-plugin integration tests
+        run: cargo test --test v2ray_plugin_integration -- --nocapture
+
+      - name: DNS pre-resolve tests
+        run: cargo test --test pre_resolve_test -- --nocapture
+
   tproxy:
     runs-on: ubuntu-latest
     needs: lint

@@ -26,6 +26,7 @@ fn minimal_raw_config() -> RawConfig {
         tproxy_port: None,
         tproxy_sni: None,
         routing_mark: None,
+        hosts: None,
     }
 }
 

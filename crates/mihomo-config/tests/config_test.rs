@@ -625,9 +625,7 @@ rules:
 
     // Verify the RULE-SET rule actually matches via its backing set.
     use mihomo_common::{Metadata, RuleMatchHelper};
-    let helper = RuleMatchHelper {
-        find_process: Box::new(|| {}),
-    };
+    let helper = RuleMatchHelper;
     let meta = Metadata {
         host: "tracker.ads.example".to_string(),
         dst_port: 443,

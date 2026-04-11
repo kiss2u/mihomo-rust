@@ -9,7 +9,7 @@ Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mih
 ## Build Commands
 
 ```bash
-# Build (requires Rust 1.70+)
+# Build (requires Rust 1.88+, pinned via workspace rust-version)
 cargo build --release
 
 # Run with config

@@ -2,7 +2,8 @@ use crate::simple_obfs::{HttpObfs, TlsObfs};
 use crate::v2ray_plugin::{self, V2rayPluginConfig};
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn,
+    Result,
 };
 use shadowsocks::config::{Mode, ServerAddr, ServerConfig, ServerType};
 use shadowsocks::context::Context;
@@ -53,6 +54,7 @@ pub struct ShadowsocksAdapter {
     addr_str: String,
     support_udp: bool,
     plugin: PluginKind,
+    health: ProxyHealth,
 }
 
 impl ShadowsocksAdapter {
@@ -124,6 +126,7 @@ impl ShadowsocksAdapter {
             addr_str,
             support_udp: udp,
             plugin,
+            health: ProxyHealth::new(),
         })
     }
 }
@@ -370,6 +373,10 @@ impl ProxyAdapter for ShadowsocksAdapter {
             .map_err(|e| MihomoError::Proxy(format!("ss udp connect: {}", e)))?;
         debug!("SS UDP connected via {}", self.addr_str);
         Ok(Box::new(SsPacketConn { socket }))
+    }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
     }
 }
 

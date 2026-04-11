@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn,
+    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, Result,
 };
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::sync::Arc;
 pub struct FallbackGroup {
     name: String,
     proxies: Vec<Arc<dyn Proxy>>,
+    health: ProxyHealth,
 }
 
 impl FallbackGroup {
@@ -15,6 +16,7 @@ impl FallbackGroup {
         Self {
             name: name.to_string(),
             proxies,
+            health: ProxyHealth::new(),
         }
     }
 
@@ -62,6 +64,10 @@ impl ProxyAdapter for FallbackGroup {
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
         self.first_alive()
     }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
+    }
 }
 
 impl Proxy for FallbackGroup {
@@ -87,5 +93,13 @@ impl Proxy for FallbackGroup {
         self.first_alive()
             .map(|p| p.delay_history())
             .unwrap_or_default()
+    }
+
+    fn members(&self) -> Option<Vec<String>> {
+        Some(self.proxies.iter().map(|p| p.name().to_string()).collect())
+    }
+
+    fn current(&self) -> Option<String> {
+        self.first_alive().map(|p| p.name().to_string())
     }
 }

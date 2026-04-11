@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn,
+    Result,
 };
 use rustls::pki_types::ServerName;
 use sha2::{Digest, Sha224};
@@ -60,6 +61,7 @@ pub struct TrojanAdapter {
     skip_verify: bool,
     addr_str: String,
     support_udp: bool,
+    health: ProxyHealth,
 }
 
 impl TrojanAdapter {
@@ -91,6 +93,7 @@ impl TrojanAdapter {
             skip_verify,
             addr_str: format!("{}:{}", server, port),
             support_udp: udp,
+            health: ProxyHealth::new(),
         }
     }
 
@@ -249,5 +252,9 @@ impl ProxyAdapter for TrojanAdapter {
         Err(MihomoError::NotSupported(
             "Trojan UDP not yet implemented".into(),
         ))
+    }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
     }
 }

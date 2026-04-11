@@ -528,7 +528,10 @@ async fn subscription_refresh_loop(
                     raw.proxy_groups = Some(fetched.proxy_groups);
                     raw.rules = Some(fetched.rules);
 
-                    match mihomo_config::rebuild_from_raw(&raw) {
+                    match mihomo_config::rebuild_from_raw_with_resolver(
+                        &raw,
+                        Some(tunnel.resolver().clone()),
+                    ) {
                         Ok((new_proxies, new_rules)) => {
                             tunnel.update_proxies(new_proxies);
                             tunnel.update_rules(new_rules);

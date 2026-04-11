@@ -2,6 +2,7 @@
 name = "mihomo-api"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mihomo-common = { workspace = true }
@@ -28,3 +29,4 @@ mihomo-trie = { workspace = true }
 tower = { workspace = true }
 http-body-util = "0.1"
 tempfile = "3"
+async-trait = { workspace = true }

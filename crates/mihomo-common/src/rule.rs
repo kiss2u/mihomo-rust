@@ -57,11 +57,15 @@ impl fmt::Display for RuleType {
     }
 }
 
-/// Helper passed to `Rule::match_metadata` to supply platform-specific lookups
-/// (currently only process-name lookup) without coupling rules to the host OS.
-pub struct RuleMatchHelper {
-    pub find_process: Box<dyn Fn() + Send + Sync>,
-}
+/// Helper passed to `Rule::match_metadata`. Historically this carried a
+/// platform-specific `find_process` closure, but process lookup is now
+/// performed once per dispatch in the tunnel match engine (which populates
+/// `Metadata.process` / `process_path` / `uid` before rule iteration). The
+/// struct is kept as an empty marker so the `Rule` trait signature can grow
+/// future per-match context (e.g. shared regex cache) without touching every
+/// call site again.
+#[derive(Default)]
+pub struct RuleMatchHelper;
 
 pub trait Rule: Send + Sync {
     fn rule_type(&self) -> RuleType;

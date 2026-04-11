@@ -13,7 +13,7 @@ pub mod process;
 pub mod rule_set;
 pub mod rule_set_rule;
 
-pub use parser::parse_rule;
+pub use parser::{parse_rule, ParserContext};
 pub use rule_set::{
     build_rule_set, ClassicalRuleSet, DomainRuleSet, IpCidrRuleSet, RuleSet, RuleSetBehavior,
     RuleSetFormat,

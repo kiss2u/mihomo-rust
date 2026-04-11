@@ -15,6 +15,10 @@ pub struct TunnelInner {
     pub rules: RwLock<Vec<Box<dyn Rule>>>,
     pub proxies: RwLock<HashMap<String, Arc<dyn Proxy>>>,
     pub resolver: Arc<Resolver>,
+    /// Fallback DIRECT adapter used when no user-defined rule matches or
+    /// when Direct/Global mode bypasses the proxies map. Pre-built with the
+    /// internal resolver so hostname dials avoid the OS resolver.
+    pub direct: Arc<DirectAdapter>,
     pub nat_table: NatTable,
     pub stats: Arc<Statistics>,
     /// Cached: true if any rule needs the dst_ip resolved (GeoIP / IP-CIDR).
@@ -51,7 +55,7 @@ impl TunnelInner {
         let mode = *self.mode.read();
         match mode {
             TunnelMode::Direct => Some((
-                Arc::new(DirectAdapter::new()) as Arc<dyn ProxyAdapter>,
+                self.direct.clone() as Arc<dyn ProxyAdapter>,
                 "Direct".into(),
                 String::new(),
             )),
@@ -65,7 +69,7 @@ impl TunnelInner {
                     ))
                 } else {
                     Some((
-                        Arc::new(DirectAdapter::new()) as Arc<dyn ProxyAdapter>,
+                        self.direct.clone() as Arc<dyn ProxyAdapter>,
                         "Direct".into(),
                         String::new(),
                     ))
@@ -83,14 +87,14 @@ impl TunnelInner {
                             .map(|p| p as Arc<dyn ProxyAdapter>)
                             .unwrap_or_else(|| {
                                 debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
-                                Arc::new(DirectAdapter::new())
+                                self.direct.clone() as Arc<dyn ProxyAdapter>
                             });
                         Some((proxy, m.rule_name, m.rule_payload))
                     }
                     None => {
                         // No rule matched, use DIRECT
                         Some((
-                            Arc::new(DirectAdapter::new()) as Arc<dyn ProxyAdapter>,
+                            self.direct.clone() as Arc<dyn ProxyAdapter>,
                             "Final".into(),
                             String::new(),
                         ))
@@ -107,12 +111,14 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn new(resolver: Arc<Resolver>) -> Self {
+        let direct = Arc::new(DirectAdapter::new().with_resolver(resolver.clone()));
         Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
                 rules: RwLock::new(Vec::new()),
                 proxies: RwLock::new(HashMap::new()),
                 resolver,
+                direct,
                 nat_table: udp::new_nat_table(),
                 stats: Arc::new(Statistics::new()),
                 needs_ip_resolution: AtomicBool::new(false),

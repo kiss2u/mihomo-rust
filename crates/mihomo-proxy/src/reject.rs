@@ -1,16 +1,21 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyPacketConn, Result,
+    AdapterType, Metadata, MihomoError, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn,
+    Result,
 };
 use std::net::SocketAddr;
 
 pub struct RejectAdapter {
     drop: bool,
+    health: ProxyHealth,
 }
 
 impl RejectAdapter {
     pub fn new(drop: bool) -> Self {
-        Self { drop }
+        Self {
+            drop,
+            health: ProxyHealth::new(),
+        }
     }
 }
 
@@ -110,5 +115,9 @@ impl ProxyAdapter for RejectAdapter {
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         Ok(Box::new(RejectPacketConn))
+    }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
     }
 }

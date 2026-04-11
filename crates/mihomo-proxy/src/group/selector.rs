@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use mihomo_common::{
-    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn,
+    AdapterType, DelayHistory, Metadata, MihomoError, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, Result,
 };
 use parking_lot::RwLock;
@@ -10,6 +10,7 @@ pub struct SelectorGroup {
     name: String,
     proxies: Vec<Arc<dyn Proxy>>,
     selected: RwLock<usize>,
+    health: ProxyHealth,
 }
 
 impl SelectorGroup {
@@ -18,6 +19,7 @@ impl SelectorGroup {
             name: name.to_string(),
             proxies,
             selected: RwLock::new(0),
+            health: ProxyHealth::new(),
         }
     }
 
@@ -75,6 +77,10 @@ impl ProxyAdapter for SelectorGroup {
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
         self.selected_proxy()
     }
+
+    fn health(&self) -> &ProxyHealth {
+        &self.health
+    }
 }
 
 impl Proxy for SelectorGroup {
@@ -104,5 +110,13 @@ impl Proxy for SelectorGroup {
         self.selected_proxy()
             .map(|p| p.delay_history())
             .unwrap_or_default()
+    }
+
+    fn members(&self) -> Option<Vec<String>> {
+        Some(self.proxy_names())
+    }
+
+    fn current(&self) -> Option<String> {
+        self.selected_proxy().map(|p| p.name().to_string())
     }
 }

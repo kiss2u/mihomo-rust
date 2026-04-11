@@ -2,6 +2,7 @@
 name = "mihomo-rules"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 mihomo-common = { workspace = true }

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use mihomo_rules::{build_rule_set, RuleSet, RuleSetBehavior, RuleSetFormat};
+use mihomo_rules::{build_rule_set, ParserContext, RuleSet, RuleSetBehavior, RuleSetFormat};
 use tracing::{info, warn};
 
 use crate::raw::RawRuleProvider;
@@ -37,6 +37,7 @@ use crate::raw::RawRuleProvider;
 pub fn load_providers(
     raw_providers: &HashMap<String, RawRuleProvider>,
     cache_dir: Option<&Path>,
+    ctx: &ParserContext,
 ) -> HashMap<String, Arc<dyn RuleSet>> {
     let mut out: HashMap<String, Arc<dyn RuleSet>> = HashMap::new();
     if raw_providers.is_empty() {
@@ -44,7 +45,7 @@ pub fn load_providers(
     }
 
     for (name, cfg) in raw_providers {
-        match load_one(name, cfg, cache_dir) {
+        match load_one(name, cfg, cache_dir, ctx) {
             Ok(set) => {
                 info!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
@@ -67,6 +68,7 @@ fn load_one(
     name: &str,
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
+    ctx: &ParserContext,
 ) -> Result<Arc<dyn RuleSet>> {
     let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{}", e))?;
 
@@ -94,7 +96,7 @@ fn load_one(
     };
 
     let entries = parse_payload(format, &raw_text)?;
-    Ok(Arc::from(build_rule_set(behavior, &entries)))
+    Ok(Arc::from(build_rule_set(behavior, &entries, ctx)))
 }
 
 /// Resolve the on-disk path used for a provider.
@@ -271,7 +273,8 @@ mod tests {
             },
         );
 
-        let out = load_providers(&providers, Some(dir.path()));
+        let ctx = ParserContext::empty();
+        let out = load_providers(&providers, Some(dir.path()), &ctx);
         assert_eq!(out.len(), 1);
         let set = out.get("test").unwrap();
         assert_eq!(set.behavior(), RuleSetBehavior::Domain);
@@ -292,7 +295,8 @@ mod tests {
                 interval: None,
             },
         );
-        let out = load_providers(&providers, None);
+        let ctx = ParserContext::empty();
+        let out = load_providers(&providers, None, &ctx);
         assert!(out.is_empty());
     }
 }

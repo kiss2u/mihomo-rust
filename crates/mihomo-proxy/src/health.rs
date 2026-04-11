@@ -1,65 +1,8 @@
-use mihomo_common::{DelayHistory, ProxyAdapter, ProxyState};
-use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use mihomo_common::ProxyAdapter;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-pub struct ProxyHealth {
-    alive: AtomicBool,
-    history: RwLock<Vec<DelayHistory>>,
-    max_history: usize,
-}
-
-impl ProxyHealth {
-    pub fn new() -> Self {
-        Self {
-            alive: AtomicBool::new(true),
-            history: RwLock::new(Vec::new()),
-            max_history: 10,
-        }
-    }
-
-    pub fn alive(&self) -> bool {
-        self.alive.load(Ordering::Relaxed)
-    }
-
-    pub fn set_alive(&self, alive: bool) {
-        self.alive.store(alive, Ordering::Relaxed);
-    }
-
-    pub fn last_delay(&self) -> u16 {
-        self.history.read().last().map(|h| h.delay).unwrap_or(0)
-    }
-
-    pub fn delay_history(&self) -> Vec<DelayHistory> {
-        self.history.read().clone()
-    }
-
-    pub fn record_delay(&self, delay: u16) {
-        let mut history = self.history.write();
-        history.push(DelayHistory {
-            time: SystemTime::now(),
-            delay,
-        });
-        if history.len() > self.max_history {
-            history.remove(0);
-        }
-        self.alive.store(delay > 0, Ordering::Relaxed);
-    }
-
-    pub fn state(&self) -> ProxyState {
-        ProxyState {
-            alive: self.alive(),
-            history: self.delay_history(),
-        }
-    }
-}
-
-impl Default for ProxyHealth {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use mihomo_common::ProxyHealth;
 
 /// Test a proxy by making an HTTP GET request and measuring round-trip time
 pub async fn url_test(adapter: &dyn ProxyAdapter, url: &str, timeout: Duration) -> u16 {
