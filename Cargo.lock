@@ -1665,6 +1665,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "httparse",
  "libc",
  "libproc",
  "parking_lot",
@@ -1735,6 +1736,7 @@ dependencies = [
  "libc",
  "mihomo-common",
  "mihomo-dns",
+ "mihomo-trie",
  "mihomo-tunnel",
  "thiserror 2.0.18",
  "tokio",

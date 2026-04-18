@@ -6,7 +6,7 @@ use mihomo_config::load_config;
 use mihomo_config::proxy_provider::ProxyProvider;
 use mihomo_config::raw::RawConfig;
 use mihomo_dns::DnsServer;
-use mihomo_listener::{MixedListener, TProxyListener};
+use mihomo_listener::{MixedListener, SnifferRuntime, TProxyListener};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -456,12 +456,16 @@ async fn run(
         });
     }
 
+    // Build shared SnifferRuntime from config (once per startup).
+    let sniffer_runtime = Arc::new(SnifferRuntime::new(config.sniffer));
+
     // Start listeners
     let bind_addr = &config.listeners.bind_address;
 
     if let Some(port) = config.listeners.mixed_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
+        let listener =
+            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("Mixed listener error: {}", e);
@@ -471,7 +475,8 @@ async fn run(
 
     if let Some(port) = config.listeners.socks_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
+        let listener =
+            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("SOCKS listener error: {}", e);
@@ -481,7 +486,8 @@ async fn run(
 
     if let Some(port) = config.listeners.http_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
+        let listener =
+            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("HTTP listener error: {}", e);
@@ -491,12 +497,11 @@ async fn run(
 
     if let Some(port) = config.listeners.tproxy_port {
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-        let listener = TProxyListener::new(
-            tunnel.clone(),
-            addr,
-            config.listeners.tproxy_sni,
-            config.listeners.routing_mark,
-        );
+        // Pass enable_sni=false to TProxyListener::new (deprecated path);
+        // the SnifferRuntime takes over via with_sniffer.
+        let listener =
+            TProxyListener::new(tunnel.clone(), addr, false, config.listeners.routing_mark)
+                .with_sniffer(sniffer_runtime.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("TProxy listener error: {}", e);

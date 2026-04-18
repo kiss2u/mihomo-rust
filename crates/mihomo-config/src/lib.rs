@@ -7,7 +7,7 @@ pub mod rule_provider;
 pub mod sub_rules_parser;
 pub mod subscription;
 
-use mihomo_common::{Proxy, Rule, TunnelMode};
+use mihomo_common::{Proxy, Rule, SnifferConfig, TunnelMode};
 use mihomo_dns::Resolver;
 use proxy_provider::ProxyProvider;
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ pub struct Config {
     pub rules: Vec<Box<dyn Rule>>,
     pub listeners: ListenerConfig,
     pub api: ApiConfig,
+    pub sniffer: SnifferConfig,
     pub raw: raw::RawConfig,
 }
 
@@ -245,6 +246,96 @@ fn rebuild_from_raw_impl(
     Ok((proxies, rules))
 }
 
+fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::Error> {
+    // Deprecated alias: tproxy_sni (pre-spec) synthesises a minimal config.
+    let has_tproxy_sni = raw.tproxy_sni.unwrap_or(false);
+
+    match raw.sniffer.as_ref() {
+        Some(rs) => {
+            if has_tproxy_sni {
+                warn!(
+                    "`tproxy_sni` is deprecated; migrate to the top-level `sniffer:` block. \
+                    `sniffer:` wins; `tproxy_sni` is ignored."
+                );
+            }
+            // Warn-and-ignore force-dns-mapping.
+            if rs.force_dns_mapping.unwrap_or(false) {
+                warn!(
+                    "sniffer.force-dns-mapping is accepted and ignored: \
+                    fake-ip is not implemented in mihomo-rust"
+                );
+            }
+            let enable = rs.enable.unwrap_or(false);
+            let timeout_ms = rs.timeout.unwrap_or(100);
+            if !(1..=60000).contains(&timeout_ms) {
+                anyhow::bail!(
+                    "sniffer.timeout must be between 1 and 60000 ms, got {}",
+                    timeout_ms
+                );
+            }
+
+            // Parse per-protocol port lists.
+            let mut tls_ports: Vec<u16> = Vec::new();
+            let mut http_ports: Vec<u16> = Vec::new();
+            if let Some(sniff_map) = rs.sniff.as_ref() {
+                for (key, proto) in sniff_map {
+                    match key.to_uppercase().as_str() {
+                        "TLS" => {
+                            tls_ports = proto.ports.clone().unwrap_or_default();
+                        }
+                        "HTTP" => {
+                            http_ports = proto.ports.clone().unwrap_or_default();
+                        }
+                        "QUIC" => {
+                            warn!("sniffer.sniff.QUIC is not implemented in mihomo-rust; ignoring");
+                        }
+                        other => {
+                            warn!("sniffer.sniff.{}: unknown protocol, ignoring", other);
+                        }
+                    }
+                }
+                if enable && tls_ports.is_empty() && http_ports.is_empty() {
+                    anyhow::bail!(
+                        "sniffer.sniff is present and enable: true, but no ports are configured \
+                        for any supported protocol (TLS/HTTP)"
+                    );
+                }
+            } else if enable {
+                anyhow::bail!("sniffer.enable is true but sniffer.sniff map is absent or empty");
+            }
+
+            Ok(SnifferConfig {
+                enable,
+                timeout: std::time::Duration::from_millis(timeout_ms),
+                parse_pure_ip: rs.parse_pure_ip.unwrap_or(true),
+                override_destination: rs.override_destination.unwrap_or(false),
+                tls_ports,
+                http_ports,
+                skip_domain: rs.skip_domain.clone().unwrap_or_default(),
+                force_domain: rs.force_domain.clone().unwrap_or_default(),
+            })
+        }
+        None if has_tproxy_sni => {
+            warn!(
+                "`tproxy_sni` is deprecated; migrate to the top-level `sniffer:` block. \
+                Accepting as `sniffer.enable: true, sniff.TLS.ports: [443]` for this release. \
+                Will be removed in a future version."
+            );
+            Ok(SnifferConfig {
+                enable: true,
+                timeout: std::time::Duration::from_millis(100),
+                parse_pure_ip: true,
+                override_destination: false,
+                tls_ports: vec![443],
+                http_ports: Vec::new(),
+                skip_domain: Vec::new(),
+                force_domain: Vec::new(),
+            })
+        }
+        None => Ok(SnifferConfig::default()),
+    }
+}
+
 /// Scan `raw.rules` for any GeoIP-backed entry (`GEOIP`, `SRC-GEOIP`) or any
 /// ASN-backed entry (`IP-ASN`, `SRC-IP-ASN`); if present, lazy-load the
 /// corresponding MMDB from the default path and build a `ParserContext`
@@ -458,6 +549,9 @@ async fn build_config(
         secret: raw.secret.clone(),
     };
 
+    // Sniffer config — also handles deprecated `tproxy_sni` alias.
+    let sniffer = parse_sniffer_config(&raw)?;
+
     info!(
         "Config loaded: mode={}, proxies={}, rules={}",
         mode,
@@ -473,6 +567,7 @@ async fn build_config(
         rules,
         listeners,
         api,
+        sniffer,
         raw,
     })
 }

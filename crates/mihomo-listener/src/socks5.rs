@@ -1,3 +1,4 @@
+use crate::sniffer::SnifferRuntime;
 use mihomo_common::{ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -15,8 +16,13 @@ const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const REP_SUCCESS: u8 = 0x00;
 
-pub async fn handle_socks5(tunnel: &Tunnel, mut stream: TcpStream, src_addr: SocketAddr) {
-    if let Err(e) = handle_socks5_inner(tunnel, &mut stream, src_addr).await {
+pub async fn handle_socks5(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
+) {
+    if let Err(e) = handle_socks5_inner(tunnel, &mut stream, src_addr, sniffer).await {
         debug!("SOCKS5 error from {}: {}", src_addr, e);
     }
 }
@@ -25,6 +31,7 @@ async fn handle_socks5_inner(
     tunnel: &Tunnel,
     stream: &mut TcpStream,
     src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
@@ -75,7 +82,7 @@ async fn handle_socks5_inner(
     stream.write_all(&reply).await?;
 
     // 4. Build metadata and hand off to tunnel
-    let metadata = Metadata {
+    let mut metadata = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Socks5,
         src_ip: Some(src_addr.ip()),
@@ -85,6 +92,11 @@ async fn handle_socks5_inner(
         host,
         ..Default::default()
     };
+
+    // Sniff TLS SNI or HTTP Host header from the initial payload bytes.
+    if let Some(rt) = sniffer {
+        rt.sniff(stream, &mut metadata).await;
+    }
 
     debug!("SOCKS5 CONNECT to {}", metadata.remote_address());
 
