@@ -69,6 +69,23 @@ mimalloc replacing the musl system allocator (eliminates heavy glibc-emulation c
 The aarch64 minimal binary is now ~5.98 MiB — **2 MiB under the 8 MiB hard budget** (ADR-0007 §2).
 All three levers (panic=abort, opt-level=z, mimalloc) are applied and shipped as part of M2.E.
 
-**Perf impact of opt-level=z**: engineer-a validation of W1/W2/W5 criterion benchmarks
-against ADR-0006 thresholds is pending. Size levers are committed; if any ADR-0006
-threshold regresses, opt-level can be moved to a separate profile or reverted.
+### Perf impact of opt-level=z (engineer-a validation, 2026-04-18)
+
+ADR-0006 thresholds are relative to Go — engineer-a ran opt-3 vs opt-z comparisons:
+
+| Benchmark | opt-level=3 | opt-level=z | delta | ADR-0006 |
+|-----------|-------------|-------------|-------|----------|
+| W1 4 KB throughput | 0.84 Gbps | 0.70 Gbps | −17% | needs Go comparison |
+| W1 64 MB throughput | 6.64 Gbps | 6.30 Gbps | −5% | acceptable |
+| W2 p99 latency | 471 µs | 489 µs | +4% | passes (well within ≤1.05× Go) |
+| W5 rule-match n=10k | ~45 µs | ~44 µs | same | passes (>>20M evals/s) |
+| W5 rule-match n=500 | 1.36 µs | 3.92 µs | 2.9× | absolute <4 µs, passes |
+
+**Verdict**: W2 and W5 pass ADR-0006 cleanly. W1 4 KB small-packet path shows −17% vs opt-3;
+ADR-0006 threshold for W1 is ≥1.10× Go throughput — cannot confirm pass/fail without a Go
+reference run. The regression is in CPU-bound per-packet overhead; bulk transfer (64 MB) is
+only −5%. `opt-level = "s"` is an available middle ground if the small-packet regression
+becomes a reported issue in production.
+
+**Fallback**: if W1 4 KB vs Go fails ADR-0006, change `opt-level = "z"` → `"s"` in the
+release profile — expected to recover inlining budget while retaining most of the size win.
