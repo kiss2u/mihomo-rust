@@ -14,8 +14,8 @@ cargo zigbuild --release --locked \
 wc -c < target/aarch64-unknown-linux-musl/release/mihomo
 ```
 
-Release profile: `lto = fat, strip = true, codegen-units = 1, panic = abort`
-(panic=abort added in M2.E per ADR-0007 §3.)
+Release profile: `lto = fat, strip = true, codegen-units = 1, panic = abort, opt-level = "z"`
+(panic=abort added in M2.E per ADR-0007 §3; opt-level=z + mimalloc added in M2.E final pass.)
 
 Feature set measured:
 - **default**: `cargo build --release` (`full` bundle: ss, trojan, vless, dns-server, all listeners)
@@ -32,6 +32,8 @@ Feature set measured:
 
 ## Measurements
 
+### Final (M2.E complete: mimalloc + opt-level=z + panic=abort)
+
 Measured 2026-04-18 on macOS/Apple Silicon cross-compiling with cargo-zigbuild + zig 0.15.2.
 **Note:** macOS `strip` cannot process ELF binaries; sizes reflect the `strip = true`
 profile setting applied during cross-compilation. Linux CI with zig 0.13.0 may differ
@@ -39,10 +41,10 @@ slightly (typically ±2%).
 
 | Target | Feature set | Stripped size | Budget | Status |
 |--------|------------|---------------|--------|--------|
-| `aarch64-unknown-linux-musl` | default (full) | 10,268,936 B (~9.8 MiB) | ≤ 20 MiB | ✓ |
-| `aarch64-unknown-linux-musl` | minimal | 9,987,832 B (~9.5 MiB) | ≤ 8 MiB | **over budget** |
-| `x86_64-unknown-linux-musl` | default (full) | 12,125,096 B (~11.6 MiB) | ≤ 20 MiB | ✓ |
-| `x86_64-unknown-linux-musl` | minimal | 11,795,296 B (~11.2 MiB) | — | informational |
+| `aarch64-unknown-linux-musl` | default (full) | 6,371,432 B (~6.07 MiB) | ≤ 20 MiB | ✓ |
+| `aarch64-unknown-linux-musl` | minimal | 6,272,040 B (~5.98 MiB) | ≤ 8 MiB | **✓ under budget** |
+| `x86_64-unknown-linux-musl` | default (full) | 7,788,120 B (~7.43 MiB) | ≤ 20 MiB | ✓ |
+| `x86_64-unknown-linux-musl` | minimal | 7,659,928 B (~7.31 MiB) | — | informational |
 | `mipsel-unknown-linux-musl` | default (full) | not measured (no macOS rustup target) | ≤ 20 MiB | — |
 | `mipsel-unknown-linux-musl` | minimal | not measured | ≤ 7 MiB | — |
 
@@ -50,27 +52,23 @@ slightly (typically ±2%).
 
 | Target | Default | Minimal | Saved | Notes |
 |--------|---------|---------|-------|-------|
-| `aarch64` | 9.8 MiB | 9.5 MiB | ~300 KB | vless + relay + h2/grpc/httpupgrade excluded |
+| `aarch64` | 6.07 MiB | 5.98 MiB | ~100 KB | vless + relay + h2/grpc/httpupgrade excluded |
 
-The ~300 KB saving from minimal confirms the feature gates are connected and LTO
-eliminates the gated code. However the absolute minimal size (9.5 MiB) exceeds
-the 8 MiB hard budget.
+### Historical progression (aarch64 minimal)
 
-## Analysis: gap to budget
+| Profile state | Size | vs 8 MiB budget |
+|--------------|------|-----------------|
+| panic=abort only | 9,987,832 B (~9.5 MiB) | –1.1 MiB over |
+| + opt-level="z" + mimalloc | 6,272,040 B (~5.98 MiB) | **+2.0 MiB headroom** |
 
-aarch64 minimal is ~1.5 MiB over the 8 MiB hard budget.
+The ~3.5 MiB saving came primarily from opt-level="z" (code size optimisation) and
+mimalloc replacing the musl system allocator (eliminates heavy glibc-emulation code).
 
-Known contributors not yet applied (per ADR-0007 and ADR-0008):
-1. **mimalloc** (ADR-0008, Task #31): replacing the system allocator is expected
-   to save ~0.5–1 MiB on musl targets where the system allocator pulls in heavy
-   glibc-emulation code.
-2. **opt-level = "z"**: optimising for size instead of speed (current: default "3")
-   is expected to save ~0.5–1 MiB.
-3. **hickory-server zombie dep** (`dns-server` feature): hickory-server is currently
-   listed as optional but referenced via the `dns-server` feature in the minimal
-   bundle. Auditing whether the dep is truly dead-code-eliminated under LTO would
-   clarify its contribution.
+## Analysis
 
-Action for architect-2: if the post-mimalloc + opt-level-z numbers still exceed
-8 MiB, the ADR-0007 §2 budget will need a §6 amendment to match observed reality.
-The M2.E feature gate infrastructure is in place; the numbers are the falsifiable signal.
+The aarch64 minimal binary is now ~5.98 MiB — **2 MiB under the 8 MiB hard budget** (ADR-0007 §2).
+All three levers (panic=abort, opt-level=z, mimalloc) are applied and shipped as part of M2.E.
+
+**Perf impact of opt-level=z**: engineer-a validation of W1/W2/W5 criterion benchmarks
+against ADR-0006 thresholds is pending. Size levers are committed; if any ADR-0006
+threshold regresses, opt-level can be moved to a separate profile or reverted.
