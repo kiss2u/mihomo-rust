@@ -1774,6 +1774,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hickory-proto",
  "serde",
  "serde_json",
  "tokio",

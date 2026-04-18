@@ -1,4 +1,5 @@
 use crate::bench_connrate::ConnRateResult;
+use crate::bench_dns::DnsResult;
 use crate::bench_latency::LatencyResult;
 use crate::bench_throughput::ThroughputResult;
 
@@ -11,12 +12,42 @@ pub struct BenchmarkResults {
     pub throughput: Vec<ThroughputResult>,
     pub latency: LatencyResult,
     pub conn_rate: ConnRateResult,
+    pub dns: Option<DnsResult>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct ComparisonReport {
     pub rust: BenchmarkResults,
     pub go: Option<BenchmarkResults>,
+}
+
+fn fmt_dns_rows(rust: Option<&DnsResult>, go: Option<&DnsResult>) -> String {
+    match (rust, go) {
+        (Some(r), Some(g)) => format!(
+            "| DNS QPS | {:.0} | {:.0} | {} |\n| DNS p99 latency | {:.0} µs | {:.0} µs | {} |\n",
+            g.qps,
+            r.qps,
+            fmt_delta(r.qps, g.qps, true),
+            g.p99_us,
+            r.p99_us,
+            fmt_delta(r.p99_us, g.p99_us, false),
+        ),
+        (Some(r), None) => format!(
+            "| DNS QPS | N/A | {:.0} | N/A |\n| DNS p99 latency | N/A | {:.0} µs | N/A |\n",
+            r.qps, r.p99_us,
+        ),
+        _ => String::new(),
+    }
+}
+
+fn fmt_dns_rows_rust_only(rust: Option<&DnsResult>) -> String {
+    match rust {
+        Some(r) => format!(
+            "| DNS QPS | {:.0} |\n| DNS p99 latency | {:.0} µs |\n",
+            r.qps, r.p99_us,
+        ),
+        None => String::new(),
+    }
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -62,7 +93,7 @@ Measured on Apple Silicon, macOS, loopback (`127.0.0.1`). Both binaries use iden
 | Latency p50 | {:.0} us | {:.0} us | {} |
 | Latency p99 | {:.0} us | {:.0} us | {} |
 | Connections/sec | {:.0} | {:.0} | {} |
-"#,
+{}"#,
             fmt_bytes(g.binary_size_bytes),
             fmt_bytes(r.binary_size_bytes),
             fmt_delta(
@@ -92,6 +123,7 @@ Measured on Apple Silicon, macOS, loopback (`127.0.0.1`). Both binaries use iden
                 g.conn_rate.connections_per_sec,
                 true,
             ),
+            fmt_dns_rows(r.dns.as_ref(), g.dns.as_ref()),
         )
     } else {
         // Rust-only results
@@ -109,7 +141,7 @@ Measured on Apple Silicon, macOS, loopback (`127.0.0.1`). Config: `mode: direct`
 | Latency p50 | {:.0} us |
 | Latency p99 | {:.0} us |
 | Connections/sec | {:.0} |
-"#,
+{}"#,
             fmt_bytes(r.binary_size_bytes),
             fmt_bytes(r.rss_idle_bytes),
             fmt_bytes(r.rss_load_bytes),
@@ -117,6 +149,7 @@ Measured on Apple Silicon, macOS, loopback (`127.0.0.1`). Config: `mode: direct`
             r.latency.p50_us,
             r.latency.p99_us,
             r.conn_rate.connections_per_sec,
+            fmt_dns_rows_rust_only(r.dns.as_ref()),
         )
     }
 }

@@ -1,0 +1,13 @@
+mixed-port: 17891
+allow-lan: false
+bind-address: "127.0.0.1"
+mode: direct
+log-level: warning
+ipv6: false
+
+dns:
+  enable: true
+  listen: "127.0.0.1:15353"
+  nameserver:
+    - "8.8.8.8"
+    - "1.1.1.1"

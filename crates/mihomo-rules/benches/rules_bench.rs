@@ -28,9 +28,11 @@ fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
 }
 
 fn make_metadata_hit(n: usize) -> Metadata {
-    // Host matches the last DOMAIN-SUFFIX rule (worst-case scan)
+    // Host matches the last DOMAIN-SUFFIX rule inserted (worst-case scan).
+    // Rules are built i % 3 == 0 → DomainSuffix. Find the last such i < n.
+    let last_suffix_i = (0..n).rev().find(|&i| i % 3 == 0).unwrap_or(0);
     Metadata {
-        host: format!("host.suffix{}.example.com", n - 3),
+        host: format!("host.suffix{}.example.com", last_suffix_i),
         dst_port: 443,
         ..Default::default()
     }
@@ -59,7 +61,7 @@ fn scan_rules(rules: &[Box<dyn Rule>], metadata: &Metadata) -> Option<String> {
 fn bench_rule_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("rule_scan");
 
-    for n in [50usize, 200, 500] {
+    for n in [50usize, 200, 500, 10_000] {
         let rules = build_rules(n);
         let meta_hit = make_metadata_hit(n);
         let meta_miss = make_metadata_miss();
