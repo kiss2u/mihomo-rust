@@ -126,7 +126,7 @@ that's a wiring bug, not a new auth surface. Flag as a release blocker.
 | D1 | `get_group_delay_fallback_three_members_ok` | 3-member `fallback` group, all `InstantOk`. Status `200`. Response body is a JSON object with exactly those 3 member names as keys, all values are `u16 > 0`. |
 | D2 | `get_group_delay_map_keys_are_member_names_not_group_name` | Explicit assert: the group name does **not** appear as a key. Guards against a silly bug where we accidentally echo the group. |
 | D3 | `get_group_delay_ordering_stable` | Same group, called twice. Assert the **string output is byte-identical** between the two calls (proves the `BTreeMap` decision from the design sketch actually landed). If engineer uses a `HashMap`, this test fails intermittently — by design. |
-| D4 | `get_group_delay_empty_group_ok` | Group with 0 members. Status `200`, body `{}`. Upstream returns `{}`, not 400. |
+| D4 | `get_group_delay_empty_group_ok` | Group with 0 members. Status `200`, body `{}`. Upstream: `hub/route/proxies.go::GetGroupDelay` returns `{}` for empty member list — NOT 400. |
 | D5 | `get_group_delay_records_into_each_member_history` | After a successful group probe, `GET /proxies/:member_name` for each member shows the new delay in `history`. Verifies spec §"Recording into history" applies per-member. |
 
 ### E. Group endpoint — concurrency and timeout semantics
