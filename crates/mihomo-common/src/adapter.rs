@@ -129,6 +129,11 @@ pub trait ProxyAdapter: Send + Sync {
     fn health(&self) -> &ProxyHealth;
 }
 
+/// Shared live proxy list owned by a `ProxyProvider`.
+/// Groups hold `Vec<ProviderSlot>` and call `effective_proxies()` at dial time
+/// to merge static members with provider-supplied proxies without caching.
+pub type ProviderSlot = std::sync::Arc<parking_lot::RwLock<Vec<std::sync::Arc<dyn Proxy>>>>;
+
 pub trait Proxy: ProxyAdapter {
     fn alive(&self) -> bool;
     fn alive_for_url(&self, url: &str) -> bool;

@@ -9,7 +9,7 @@ pub mod process_lookup;
 pub mod rule;
 pub mod tunnel_mode;
 
-pub use adapter::{DelayHistory, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
+pub use adapter::{DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
 pub use adapter_type::{AdapterType, ConnType};
 pub use conn::{ProxyConn, ProxyPacketConn, UdpPacket};
 pub use dns_mode::DnsMode;

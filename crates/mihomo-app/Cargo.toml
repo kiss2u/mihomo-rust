@@ -27,6 +27,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_yaml = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = { workspace = true }
 rustls = { workspace = true }
 libc = "0.2"
 

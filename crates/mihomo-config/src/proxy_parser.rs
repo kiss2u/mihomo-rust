@@ -752,8 +752,9 @@ fn serialize_plugin_opts(opts: &serde_yaml::Value) -> Option<String> {
 pub fn parse_proxy_group(
     config: &crate::raw::RawProxyGroup,
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+    providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
-    parse_proxy_group_inner(config, existing_proxies, true)
+    parse_proxy_group_inner(config, existing_proxies, true, providers)
 }
 
 /// Lenient variant: unknown members are warned and skipped rather than
@@ -763,17 +764,27 @@ pub fn parse_proxy_group(
 pub fn parse_proxy_group_lenient(
     config: &crate::raw::RawProxyGroup,
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+    providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
-    parse_proxy_group_inner(config, existing_proxies, false)
+    parse_proxy_group_inner(config, existing_proxies, false, providers)
 }
 
 fn parse_proxy_group_inner(
     config: &crate::raw::RawProxyGroup,
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
     strict: bool,
+    providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
+    let mut proxies: Vec<Arc<dyn Proxy>> = Vec::new();
+
+    // include_all_proxies: add all config-defined proxies to static list
+    if config.include_all_proxies.unwrap_or(false) {
+        for p in existing_proxies.values() {
+            proxies.push(p.clone());
+        }
+    }
+
     let proxy_names = config.proxies.as_deref().unwrap_or(&[]);
-    let mut proxies: Vec<Arc<dyn Proxy>> = Vec::with_capacity(proxy_names.len());
     for name in proxy_names {
         match existing_proxies.get(name.as_str()) {
             Some(proxy) => proxies.push(proxy.clone()),
@@ -793,21 +804,57 @@ fn parse_proxy_group_inner(
         }
     }
 
-    if proxies.is_empty() {
-        return Err(format!("group '{}' has no valid proxies", config.name));
+    // Collect provider slots: include_all wires every provider; use: wires specific ones.
+    let slots: Vec<mihomo_common::ProviderSlot> = if config.include_all.unwrap_or(false) {
+        providers.values().map(|p| p.slot.clone()).collect()
+    } else {
+        config
+            .use_providers
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|pname| {
+                if let Some(p) = providers.get(pname.as_str()) {
+                    Some(p.slot.clone())
+                } else {
+                    tracing::warn!(
+                        "proxy-provider '{}' not found for group '{}', skipping",
+                        pname,
+                        config.name
+                    );
+                    None
+                }
+            })
+            .collect()
+    };
+
+    if proxies.is_empty() && slots.is_empty() {
+        return Err(format!(
+            "group '{}' has no valid proxies or providers",
+            config.name
+        ));
     }
 
     match config.group_type.as_str() {
-        "select" => Ok(Arc::new(SelectorGroup::new(&config.name, proxies))),
+        "select" => Ok(Arc::new(SelectorGroup::new_with_providers(
+            &config.name,
+            proxies,
+            slots,
+        ))),
         "url-test" => {
             let tolerance = config.tolerance.unwrap_or(150);
-            Ok(Arc::new(UrlTestGroup::new(
+            Ok(Arc::new(UrlTestGroup::new_with_providers(
                 &config.name,
                 proxies,
                 tolerance,
+                slots,
             )))
         }
-        "fallback" => Ok(Arc::new(FallbackGroup::new(&config.name, proxies))),
+        "fallback" => Ok(Arc::new(FallbackGroup::new_with_providers(
+            &config.name,
+            proxies,
+            slots,
+        ))),
         "load-balance" => {
             let strategy = parse_lb_strategy(config.strategy.as_deref())?;
             Ok(Arc::new(LoadBalanceGroup::new(
@@ -1130,7 +1177,7 @@ tls: true
             m
         };
         let config = relay_config("r", vec!["DIRECT".to_string()]);
-        let err = parse_proxy_group(&config, &existing)
+        let err = parse_proxy_group(&config, &existing, &Default::default())
             .err()
             .expect("single-proxy relay must error");
         assert!(
@@ -1156,7 +1203,7 @@ tls: true
         // parse_proxy_group_inner will return "no valid proxies" before reaching
         // relay-specific check (0 proxies ≠ relay-specific error, but still errors).
         // Both paths must return Err.
-        assert!(parse_proxy_group(&config, &existing).is_err());
+        assert!(parse_proxy_group(&config, &existing, &Default::default()).is_err());
     }
 
     // B3: url field on relay group → warn (NOT error)
@@ -1178,7 +1225,8 @@ tls: true
             ..Default::default()
         };
         // Must NOT error — url is warn-only (Class B).
-        parse_proxy_group(&config, &existing).expect("relay with url must not hard-error");
+        parse_proxy_group(&config, &existing, &Default::default())
+            .expect("relay with url must not hard-error");
     }
 
     // B4: interval field on relay group → warn (NOT error)
@@ -1197,7 +1245,8 @@ tls: true
             interval: Some(300),
             ..Default::default()
         };
-        parse_proxy_group(&config, &existing).expect("relay with interval must not hard-error");
+        parse_proxy_group(&config, &existing, &Default::default())
+            .expect("relay with interval must not hard-error");
     }
 
     // B5: both url and interval present → two separate warns, still not an error
@@ -1217,6 +1266,7 @@ tls: true
             interval: Some(300),
             ..Default::default()
         };
-        parse_proxy_group(&config, &existing).expect("relay with url+interval must not hard-error");
+        parse_proxy_group(&config, &existing, &Default::default())
+            .expect("relay with url+interval must not hard-error");
     }
 }

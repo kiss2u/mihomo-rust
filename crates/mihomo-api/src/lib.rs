@@ -2,8 +2,9 @@ pub mod log_stream;
 pub mod routes;
 pub mod ui;
 
+use dashmap::DashMap;
 use log_stream::LogMessage;
-use mihomo_config::raw::RawConfig;
+use mihomo_config::{proxy_provider::ProxyProvider, raw::RawConfig};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -18,6 +19,7 @@ pub struct ApiServer {
     config_path: String,
     raw_config: Arc<RwLock<RawConfig>>,
     log_tx: broadcast::Sender<LogMessage>,
+    proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
 }
 
 impl ApiServer {
@@ -28,6 +30,7 @@ impl ApiServer {
         config_path: String,
         raw_config: Arc<RwLock<RawConfig>>,
         log_tx: broadcast::Sender<LogMessage>,
+        proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
     ) -> Self {
         Self {
             tunnel,
@@ -36,6 +39,7 @@ impl ApiServer {
             config_path,
             raw_config,
             log_tx,
+            proxy_providers,
         }
     }
 
@@ -46,6 +50,7 @@ impl ApiServer {
             config_path: self.config_path.clone(),
             raw_config: self.raw_config.clone(),
             log_tx: self.log_tx.clone(),
+            proxy_providers: self.proxy_providers.clone(),
         });
 
         let app = routes::create_router(state);

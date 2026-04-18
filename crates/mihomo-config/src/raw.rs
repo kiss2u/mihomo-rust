@@ -17,6 +17,7 @@ pub struct RawConfig {
     pub dns: Option<RawDns>,
     pub proxies: Option<Vec<HashMap<String, serde_yaml::Value>>>,
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
+    pub proxy_providers: Option<HashMap<String, RawProxyProvider>>,
     pub rules: Option<Vec<String>>,
     pub rule_providers: Option<HashMap<String, RawRuleProvider>>,
     /// Named sub-rule blocks. Each key is a block name; each value is a
@@ -73,6 +74,37 @@ pub struct RawProxyGroup {
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
     pub strategy: Option<String>,
+    pub lazy: Option<bool>,
+    #[serde(rename = "use")]
+    pub use_providers: Option<Vec<String>>,
+    pub filter: Option<String>,
+    pub exclude_filter: Option<String>,
+    pub exclude_type: Option<Vec<String>>,
+    pub include_all: Option<bool>,
+    pub include_all_proxies: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawProxyProvider {
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub interval: Option<u64>,
+    pub filter: Option<String>,
+    pub exclude_filter: Option<String>,
+    pub exclude_type: Option<Vec<String>>,
+    pub health_check: Option<RawHealthCheck>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawHealthCheck {
+    pub enable: Option<bool>,
+    pub url: Option<String>,
+    pub interval: Option<u64>,
+    pub timeout: Option<u64>,
     pub lazy: Option<bool>,
 }
 
