@@ -908,3 +908,94 @@ fn parse_unknown_rule_type_still_errors() {
         err
     );
 }
+
+// ─── GEOSITE (M1.D-2) ──────────────────────────────────────────────
+
+#[test]
+fn parse_geosite_without_db_tolerated_always_no_match() {
+    // Class A divergence from upstream (spec §Divergences #3): upstream
+    // errors at parse if DB absent; we tolerate and no-match at runtime.
+    // upstream: rules/geosite.go — errors at parse if DB absent.
+    let r = parse_rule("GEOSITE,cn,DIRECT").unwrap();
+    assert_eq!(r.rule_type(), RuleType::GeoSite);
+    assert_eq!(r.adapter(), "DIRECT");
+    // No DB → no match, no panic.
+    assert!(!r.match_metadata(&meta("baidu.com", 443), &helper()));
+}
+
+#[test]
+fn parse_geosite_with_fixture_db_matches() {
+    use mihomo_rules::geosite::GeositeDB;
+    use mihomo_rules::parse_rule as parse_rule_raw;
+    use mihomo_rules::ParserContext;
+    use std::sync::Arc;
+
+    let mut db = GeositeDB::empty();
+    db.insert("cn", "baidu.com");
+    db.insert("cn", "qq.com");
+    db.insert("ads", "ad.example.com");
+    let ctx = ParserContext {
+        geosite: Some(Arc::new(db)),
+        ..Default::default()
+    };
+    let r = parse_rule_raw("GEOSITE,cn,DIRECT", &ctx).unwrap();
+    assert!(r.match_metadata(&meta("baidu.com", 443), &helper()));
+    assert!(r.match_metadata(&meta("qq.com", 443), &helper()));
+    assert!(!r.match_metadata(&meta("google.com", 443), &helper()));
+}
+
+#[test]
+fn parse_geosite_at_suffix_stripped_and_rule_still_matches() {
+    // Class B divergence (spec §Divergences #2) — @-attribute filtering
+    // deferred; suffix stripped and full category used.
+    // upstream: rules/geosite.go — @-attribute filters the category.
+    use mihomo_rules::geosite::GeositeDB;
+    use mihomo_rules::parse_rule as parse_rule_raw;
+    use mihomo_rules::ParserContext;
+    use std::sync::Arc;
+
+    let mut db = GeositeDB::empty();
+    db.insert("cn", "baidu.com");
+    let ctx = ParserContext {
+        geosite: Some(Arc::new(db)),
+        ..Default::default()
+    };
+    let r = parse_rule_raw("GEOSITE,cn@!cn,DIRECT", &ctx).unwrap();
+    // Full category used after suffix strip.
+    assert!(r.match_metadata(&meta("baidu.com", 443), &helper()));
+}
+
+#[test]
+fn parse_geosite_empty_category_hard_errors() {
+    let err = match parse_rule("GEOSITE,,DIRECT") {
+        Ok(_) => panic!("expected parse error"),
+        Err(e) => e,
+    };
+    assert!(err.contains("GEOSITE"), "unexpected: {}", err);
+}
+
+#[test]
+fn parse_geosite_shared_arc_across_rules() {
+    // F1 — multiple GEOSITE rules share one Arc<GeositeDB>.
+    // Guard: constructing N rules with the same context clones the Arc,
+    // it does NOT re-load or re-parse the DB per rule.
+    use mihomo_rules::geosite::GeositeDB;
+    use mihomo_rules::parse_rule as parse_rule_raw;
+    use mihomo_rules::ParserContext;
+    use std::sync::Arc;
+
+    let mut db = GeositeDB::empty();
+    db.insert("cn", "baidu.com");
+    db.insert("ads", "ad.example.com");
+    let arc = Arc::new(db);
+    let ctx = ParserContext {
+        geosite: Some(Arc::clone(&arc)),
+        ..Default::default()
+    };
+    let _r1 = parse_rule_raw("GEOSITE,cn,DIRECT", &ctx).unwrap();
+    let _r2 = parse_rule_raw("GEOSITE,ads,REJECT", &ctx).unwrap();
+    let _r3 = parse_rule_raw("GEOSITE,geolocation-!cn,Proxy", &ctx).unwrap();
+    // Each rule clones the Arc; strong_count is original (1 from `arc`)
+    // + 3 (one per rule) + 1 (from ctx.geosite) = 5.
+    assert_eq!(Arc::strong_count(&arc), 5);
+}

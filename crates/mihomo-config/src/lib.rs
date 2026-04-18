@@ -239,10 +239,20 @@ pub fn rebuild_from_raw_with_cache_dir(
 /// carrying the readers. Fail-fast (returning an error that names the
 /// offending rule and the path we tried) when the scan matches but the
 /// load fails.
+///
+/// For `GEOSITE` entries the DB is discovered separately and loaded only if
+/// at least one GEOSITE rule is present (same lazy pattern as GeoIP/ASN).
+/// Unlike GeoIP/ASN, the GEOSITE DB is tolerated as absent — per spec the
+/// rule no-matches at query time rather than failing at parse.
 fn build_parser_context(
     raw: &raw::RawConfig,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
-    build_parser_context_at(raw, default_geoip_path(), default_asn_path())
+    build_parser_context_at(
+        raw,
+        default_geoip_path(),
+        default_asn_path(),
+        mihomo_rules::geosite::default_geosite_candidates(),
+    )
 }
 
 /// Same as [`build_parser_context`] but lets the caller override the mmdb
@@ -251,6 +261,7 @@ fn build_parser_context_at(
     raw: &raw::RawConfig,
     geoip_path: PathBuf,
     asn_path: PathBuf,
+    geosite_candidates: Vec<PathBuf>,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
     let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
 
@@ -266,7 +277,19 @@ fn build_parser_context_at(
         None => None,
     };
 
-    Ok(mihomo_rules::ParserContext { geoip, asn })
+    let geosite_trigger = lines.iter().any(|l| line_is_geosite_rule(l));
+    let geosite = if geosite_trigger {
+        mihomo_rules::geosite::discover_and_load_from(&geosite_candidates)
+    } else {
+        None
+    };
+
+    Ok(mihomo_rules::ParserContext {
+        geoip,
+        asn,
+        geosite,
+        ..Default::default()
+    })
 }
 
 fn load_mmdb(
@@ -305,6 +328,18 @@ fn line_is_geoip_rule(line: &str) -> bool {
     }
     let ty = line.split(',').next().unwrap_or("").trim();
     ty.eq_ignore_ascii_case("GEOIP") || ty.eq_ignore_ascii_case("SRC-GEOIP")
+}
+
+/// True iff `line` (a raw `rules:` entry) is a `GEOSITE` entry that needs
+/// the geosite DB. Guards against false positives from `GEOIP` (shares the
+/// `GEO` prefix).
+fn line_is_geosite_rule(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+    let ty = line.split(',').next().unwrap_or("").trim();
+    ty.eq_ignore_ascii_case("GEOSITE")
 }
 
 /// True iff `line` (a raw `rules:` entry) reads the GeoLite2-ASN database.
@@ -440,6 +475,10 @@ mod geoip_context_tests {
         PathBuf::from("/definitely/not/a/real/path/GeoLite2-ASN.mmdb")
     }
 
+    fn nonexistent_geosite() -> Vec<PathBuf> {
+        vec![PathBuf::from("/definitely/not/a/real/path/geosite.mrs")]
+    }
+
     #[test]
     fn no_geoip_rules_skips_mmdb_load() {
         let raw = raw_with_rules(vec![
@@ -448,7 +487,9 @@ mod geoip_context_tests {
         ]);
         // Point at a path guaranteed not to exist — should be ignored.
         let nonexistent = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
-        let ctx = build_parser_context_at(&raw, nonexistent, nonexistent_asn()).unwrap();
+        let ctx =
+            build_parser_context_at(&raw, nonexistent, nonexistent_asn(), nonexistent_geosite())
+                .unwrap();
         assert!(ctx.geoip.is_none());
         assert!(ctx.asn.is_none());
     }
@@ -457,8 +498,13 @@ mod geoip_context_tests {
     fn missing_mmdb_with_geoip_rule_errors_with_path_and_rule() {
         let raw = raw_with_rules(vec!["DOMAIN,example.com,DIRECT", "GEOIP,CN,DIRECT"]);
         let nonexistent = PathBuf::from("/nonexistent-test-path-42/Country.mmdb");
-        let err = build_parser_context_at(&raw, nonexistent.clone(), nonexistent_asn())
-            .expect_err("must fail-fast when mmdb is missing");
+        let err = build_parser_context_at(
+            &raw,
+            nonexistent.clone(),
+            nonexistent_asn(),
+            nonexistent_geosite(),
+        )
+        .expect_err("must fail-fast when mmdb is missing");
         let msg = format!("{}", err);
         assert!(
             msg.contains("/nonexistent-test-path-42/Country.mmdb"),
@@ -477,8 +523,13 @@ mod geoip_context_tests {
         let raw = raw_with_rules(vec!["GEOIP,CN,DIRECT"]);
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"not a real mmdb file").unwrap();
-        let err = build_parser_context_at(&raw, tmp.path().to_path_buf(), nonexistent_asn())
-            .expect_err("garbage bytes must fail to parse as mmdb");
+        let err = build_parser_context_at(
+            &raw,
+            tmp.path().to_path_buf(),
+            nonexistent_asn(),
+            nonexistent_geosite(),
+        )
+        .expect_err("garbage bytes must fail to parse as mmdb");
         let msg = format!("{}", err);
         assert!(msg.contains("GeoIP"), "error should mention GeoIP: {}", msg);
     }
@@ -503,7 +554,13 @@ mod geoip_context_tests {
     fn no_asn_rules_skips_asn_mmdb_load() {
         let raw = raw_with_rules(vec!["DOMAIN,example.com,DIRECT"]);
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
-        let ctx = build_parser_context_at(&raw, nonexistent_geoip, nonexistent_asn()).unwrap();
+        let ctx = build_parser_context_at(
+            &raw,
+            nonexistent_geoip,
+            nonexistent_asn(),
+            nonexistent_geosite(),
+        )
+        .unwrap();
         assert!(ctx.asn.is_none());
     }
 
@@ -512,8 +569,9 @@ mod geoip_context_tests {
         let raw = raw_with_rules(vec!["IP-ASN,13335,PROXY"]);
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let asn = PathBuf::from("/nonexistent-test-path-asn/GeoLite2-ASN.mmdb");
-        let err = build_parser_context_at(&raw, nonexistent_geoip, asn.clone())
-            .expect_err("must fail-fast when ASN mmdb is missing");
+        let err =
+            build_parser_context_at(&raw, nonexistent_geoip, asn.clone(), nonexistent_geosite())
+                .expect_err("must fail-fast when ASN mmdb is missing");
         let msg = format!("{}", err);
         assert!(
             msg.contains(&asn.display().to_string()),

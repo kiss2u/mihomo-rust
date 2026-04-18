@@ -90,6 +90,9 @@ regex = "1"
 # Byte manipulation
 bytes = "1"
 
+# Compression (mrs geosite / rule-provider binary format)
+zstd = "0.13"
+
 # Randomness
 rand = "0.9"
 
