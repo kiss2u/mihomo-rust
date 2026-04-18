@@ -32,6 +32,7 @@ pub enum RuleType {
     SubRule,
     InName,
     InType,
+    InUser,
 }
 
 impl fmt::Display for RuleType {
@@ -65,6 +66,7 @@ impl fmt::Display for RuleType {
             RuleType::SubRule => write!(f, "SUB-RULE"),
             RuleType::InName => write!(f, "IN-NAME"),
             RuleType::InType => write!(f, "IN-TYPE"),
+            RuleType::InUser => write!(f, "IN-USER"),
         }
     }
 }

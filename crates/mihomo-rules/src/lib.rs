@@ -11,6 +11,7 @@ pub mod geosite_rule;
 pub mod in_name;
 pub mod in_port;
 pub mod in_type;
+pub mod in_user;
 pub mod ip_asn;
 pub mod ip_suffix;
 pub mod ipcidr;
