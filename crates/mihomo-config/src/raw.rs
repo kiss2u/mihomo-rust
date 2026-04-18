@@ -32,6 +32,8 @@ pub struct RawConfig {
     /// Values may be a single IP string or a list of IPs.
     pub hosts: Option<HashMap<String, HostsValue>>,
     pub sniffer: Option<RawSniffer>,
+    pub authentication: Option<Vec<String>>,
+    pub skip_auth_prefixes: Option<Vec<String>>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.

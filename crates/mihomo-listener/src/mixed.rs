@@ -1,6 +1,7 @@
 use crate::http_proxy;
 use crate::sniffer::SnifferRuntime;
 use crate::socks5;
+use mihomo_common::AuthConfig;
 use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ pub struct MixedListener {
     tunnel: Tunnel,
     listen_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
+    auth: Option<Arc<AuthConfig>>,
 }
 
 impl MixedListener {
@@ -19,12 +21,20 @@ impl MixedListener {
             tunnel,
             listen_addr,
             sniffer: None,
+            auth: None,
         }
     }
 
     pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
         if sniffer.is_enabled() {
             self.sniffer = Some(sniffer);
+        }
+        self
+    }
+
+    pub fn with_auth(mut self, auth: Arc<AuthConfig>) -> Self {
+        if !auth.credentials.is_empty() {
+            self.auth = Some(auth);
         }
         self
     }
@@ -44,8 +54,9 @@ impl MixedListener {
 
             let tunnel = self.tunnel.clone();
             let sniffer = self.sniffer.clone();
+            let auth = self.auth.clone();
             tokio::spawn(async move {
-                handle_connection(tunnel, stream, src_addr, sniffer).await;
+                handle_connection(tunnel, stream, src_addr, sniffer, auth).await;
             });
         }
     }
@@ -56,6 +67,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
+    auth: Option<Arc<AuthConfig>>,
 ) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
@@ -70,9 +82,23 @@ async fn handle_connection(
 
     if peek[0] == 0x05 {
         // SOCKS5
-        socks5::handle_socks5(&tunnel, stream, src_addr, sniffer.as_deref()).await;
+        socks5::handle_socks5(
+            &tunnel,
+            stream,
+            src_addr,
+            sniffer.as_deref(),
+            auth.as_deref(),
+        )
+        .await;
     } else {
         // HTTP proxy
-        http_proxy::handle_http(&tunnel, stream, src_addr, sniffer.as_deref()).await;
+        http_proxy::handle_http(
+            &tunnel,
+            stream,
+            src_addr,
+            sniffer.as_deref(),
+            auth.as_deref(),
+        )
+        .await;
     }
 }

@@ -458,14 +458,16 @@ async fn run(
 
     // Build shared SnifferRuntime from config (once per startup).
     let sniffer_runtime = Arc::new(SnifferRuntime::new(config.sniffer));
+    let auth = config.auth;
 
     // Start listeners
     let bind_addr = &config.listeners.bind_address;
 
     if let Some(port) = config.listeners.mixed_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
+        let listener = MixedListener::new(tunnel.clone(), addr)
+            .with_sniffer(sniffer_runtime.clone())
+            .with_auth(auth.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("Mixed listener error: {}", e);
@@ -475,8 +477,9 @@ async fn run(
 
     if let Some(port) = config.listeners.socks_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
+        let listener = MixedListener::new(tunnel.clone(), addr)
+            .with_sniffer(sniffer_runtime.clone())
+            .with_auth(auth.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("SOCKS listener error: {}", e);
@@ -486,8 +489,9 @@ async fn run(
 
     if let Some(port) = config.listeners.http_port {
         let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
+        let listener = MixedListener::new(tunnel.clone(), addr)
+            .with_sniffer(sniffer_runtime.clone())
+            .with_auth(auth.clone());
         tokio::spawn(async move {
             if let Err(e) = listener.run().await {
                 error!("HTTP listener error: {}", e);

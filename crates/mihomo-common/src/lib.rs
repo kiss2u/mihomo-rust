@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod adapter_type;
+pub mod auth;
 pub mod conn;
 pub mod dns_mode;
 pub mod error;
@@ -12,6 +13,7 @@ pub mod tunnel_mode;
 
 pub use adapter::{DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
 pub use adapter_type::{AdapterType, ConnType};
+pub use auth::{AuthConfig, Credentials};
 pub use conn::{ProxyConn, ProxyPacketConn, UdpPacket};
 pub use dns_mode::DnsMode;
 pub use error::{MihomoError, Result};

@@ -47,6 +47,9 @@ pub struct Metadata {
     pub in_port: u16,
     #[serde(rename = "specialProxy")]
     pub special_proxy: String,
+    /// Authenticated username; `None` when auth was skipped or not configured.
+    #[serde(rename = "inboundUser", skip_serializing_if = "Option::is_none")]
+    pub in_user: Option<String>,
 }
 
 impl Default for Metadata {
@@ -70,6 +73,7 @@ impl Default for Metadata {
             in_name: String::new(),
             in_port: 0,
             special_proxy: String::new(),
+            in_user: None,
         }
     }
 }
@@ -124,6 +128,7 @@ impl Metadata {
             sniff_host: String::new(),
             in_name: String::new(),
             in_port: 0,
+            in_user: None,
             special_proxy: String::new(),
         }
     }
