@@ -1,10 +1,10 @@
-use mihomo_common::{find_process, Metadata, Rule, RuleMatchHelper};
+use mihomo_common::{find_process, Metadata, Rule, RuleMatchHelper, RuleType};
 use std::net::SocketAddr;
 use tracing::trace;
 
 pub struct MatchResult {
     pub adapter_name: String,
-    pub rule_name: String,
+    pub rule_type: RuleType,
     pub rule_payload: String,
 }
 
@@ -26,7 +26,7 @@ pub fn match_rules(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Option<Match
         if let Some(adapter_name) = rule.match_and_resolve(meta, &helper) {
             return Some(MatchResult {
                 adapter_name,
-                rule_name: format!("{}", rule.rule_type()),
+                rule_type: rule.rule_type(),
                 rule_payload: rule.payload().to_string(),
             });
         }
@@ -110,7 +110,7 @@ mod tests {
         let meta = base_metadata(local);
         let result = match_rules(&meta, &rules).expect("engine must return a match");
         assert_eq!(result.adapter_name, "Proxy");
-        assert_eq!(result.rule_name, "PROCESS-NAME");
+        assert_eq!(result.rule_type.as_str(), "PROCESS-NAME");
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         let meta = base_metadata(local);
         let result = match_rules(&meta, &rules).expect("final rule should match");
         assert_eq!(result.adapter_name, "DIRECT");
-        assert_eq!(result.rule_name, "MATCH");
+        assert_eq!(result.rule_type.as_str(), "MATCH");
     }
 
     #[test]

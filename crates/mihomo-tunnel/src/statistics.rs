@@ -2,7 +2,37 @@ use dashmap::DashMap;
 use mihomo_common::Metadata;
 use serde::Serialize;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use uuid::Uuid;
+
+/// Hot-path rule-match counters. Keys are `&'static str` to avoid per-call
+/// allocation since `increment` is called on every proxied connection.
+pub struct RuleMatchCounters {
+    inner: DashMap<(&'static str, &'static str), u64>,
+}
+
+impl RuleMatchCounters {
+    pub fn new() -> Self {
+        Self {
+            inner: DashMap::new(),
+        }
+    }
+
+    /// `rule_type` and `action` MUST be `'static` literals (e.g. "DOMAIN", "PROXY").
+    pub fn increment(&self, rule_type: &'static str, action: &'static str) {
+        *self.inner.entry((rule_type, action)).or_insert(0) += 1;
+    }
+
+    pub fn snapshot(&self) -> Vec<((&'static str, &'static str), u64)> {
+        self.inner.iter().map(|e| (*e.key(), *e.value())).collect()
+    }
+}
+
+impl Default for RuleMatchCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Serialize, Clone)]
 pub struct ConnectionInfo {
@@ -21,6 +51,7 @@ pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
     pub connections: DashMap<String, ConnectionInfo>,
+    pub rule_match: Arc<RuleMatchCounters>,
 }
 
 impl Statistics {
@@ -29,6 +60,7 @@ impl Statistics {
             upload_total: AtomicI64::new(0),
             download_total: AtomicI64::new(0),
             connections: DashMap::new(),
+            rule_match: Arc::new(RuleMatchCounters::new()),
         }
     }
 
@@ -71,6 +103,10 @@ impl Statistics {
             self.upload_total.load(Ordering::Relaxed),
             self.download_total.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn active_connection_count(&self) -> usize {
+        self.connections.len()
     }
 
     pub fn active_connections(&self) -> Vec<ConnectionInfo> {
