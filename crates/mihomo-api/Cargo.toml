@@ -10,6 +10,7 @@ mihomo-tunnel = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-config = { workspace = true }
 mihomo-proxy = { workspace = true }
+mihomo-rules = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

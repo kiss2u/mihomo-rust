@@ -21,8 +21,12 @@ pub async fn handle_socks5(
     mut stream: TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    in_name: &str,
+    in_port: u16,
 ) {
-    if let Err(e) = handle_socks5_inner(tunnel, &mut stream, src_addr, sniffer).await {
+    if let Err(e) =
+        handle_socks5_inner(tunnel, &mut stream, src_addr, sniffer, in_name, in_port).await
+    {
         debug!("SOCKS5 error from {}: {}", src_addr, e);
     }
 }
@@ -32,6 +36,8 @@ async fn handle_socks5_inner(
     stream: &mut TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    in_name: &str,
+    in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
@@ -90,6 +96,8 @@ async fn handle_socks5_inner(
         dst_ip,
         dst_port,
         host,
+        in_name: in_name.to_string(),
+        in_port,
         ..Default::default()
     };
 

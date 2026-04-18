@@ -16,6 +16,7 @@ pub struct TProxyListener {
     listen_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
     routing_mark: Option<u32>,
+    name: String,
 }
 
 impl TProxyListener {
@@ -24,6 +25,7 @@ impl TProxyListener {
         listen_addr: SocketAddr,
         enable_sni: bool,
         routing_mark: Option<u32>,
+        name: String,
     ) -> Self {
         // Deprecated `enable_sni` knob: synthesise a minimal sniffer config.
         let sniffer = if enable_sni {
@@ -47,6 +49,7 @@ impl TProxyListener {
             listen_addr,
             sniffer,
             routing_mark,
+            name,
         }
     }
 
@@ -66,17 +69,21 @@ impl TProxyListener {
             FirewallGuard::setup(self.listen_addr.port(), self.routing_mark, &bypass_ips)?;
 
         let listener = TcpListener::bind(self.listen_addr).await?;
-        info!("TProxy listener started on {}", self.listen_addr);
+        info!(
+            "TProxy listener '{}' started on {}",
+            self.name, self.listen_addr
+        );
 
         loop {
             let (stream, src_addr) = listener.accept().await?;
             let tunnel = self.tunnel.clone();
             let listen_addr = self.listen_addr;
             let sniffer = self.sniffer.clone();
+            let name = self.name.clone();
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_tproxy_conn(tunnel, stream, src_addr, listen_addr, sniffer).await
+                    handle_tproxy_conn(tunnel, stream, src_addr, listen_addr, sniffer, name).await
                 {
                     debug!("TProxy connection error from {}: {}", src_addr, e);
                 }
@@ -132,6 +139,7 @@ async fn handle_tproxy_conn(
     src_addr: SocketAddr,
     listen_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
+    name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Recover the original destination address
     let orig_dst = orig_dest::get_original_dst(&stream, listen_addr)?;
@@ -144,13 +152,13 @@ async fn handle_tproxy_conn(
     // Build initial metadata with IP-literal host for sniffer / DNS-snoop.
     let mut metadata = Metadata {
         network: Network::Tcp,
-        conn_type: ConnType::Redir,
+        conn_type: ConnType::TProxy,
         src_ip: Some(src_addr.ip()),
         src_port: src_addr.port(),
         dst_ip: Some(orig_dst.ip()),
         dst_port: orig_dst.port(),
         host: String::new(),
-        in_name: "tproxy".to_string(),
+        in_name: name,
         in_port: listen_addr.port(),
         ..Default::default()
     };

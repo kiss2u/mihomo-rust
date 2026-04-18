@@ -32,6 +32,9 @@ pub struct RawConfig {
     /// Values may be a single IP string or a list of IPs.
     pub hosts: Option<HashMap<String, HostsValue>>,
     pub sniffer: Option<RawSniffer>,
+    /// Named listener array. Each entry defines an explicitly-named proxy
+    /// listener instance. Merged with the shorthand port fields at parse time.
+    pub listeners: Option<Vec<RawListener>>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.
@@ -51,6 +54,18 @@ impl HostsValue {
     }
 }
 
+/// One entry in the `listeners:` array.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawListener {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub listener_type: String,
+    pub port: u16,
+    pub listen: Option<String>,
+    pub tproxy_sni: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawDns {
@@ -62,6 +77,43 @@ pub struct RawDns {
     pub nameserver: Option<Vec<String>>,
     pub fallback: Option<Vec<String>>,
     pub fake_ip_filter: Option<Vec<String>>,
+    /// If false, the hosts trie lookup is skipped entirely at query time.
+    pub use_hosts: Option<bool>,
+    /// If true, `/etc/hosts` is read at startup and merged (lower priority than
+    /// `dns.hosts` config entries). No-op + warn on Windows.
+    pub use_system_hosts: Option<bool>,
+    /// Per-domain nameserver routing: each key is an exact domain or a `+.`
+    /// wildcard prefix; value is a single server URL or a list of URLs.
+    pub nameserver_policy: Option<HashMap<String, RawNspValue>>,
+    /// Controls when the `fallback:` nameservers replace the primary result.
+    pub fallback_filter: Option<RawFallbackFilter>,
+}
+
+/// A nameserver-policy value: either a single URL string or a list of URLs.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum RawNspValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RawNspValue {
+    pub fn as_urls(&self) -> Vec<&str> {
+        match self {
+            RawNspValue::One(s) => vec![s.as_str()],
+            RawNspValue::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// `fallback-filter` YAML block.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawFallbackFilter {
+    pub geoip: Option<bool>,
+    pub geoip_code: Option<String>,
+    pub ipcidr: Option<Vec<String>>,
+    pub domain: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -117,12 +169,14 @@ pub struct RawHealthCheck {
 #[serde(rename_all = "kebab-case")]
 pub struct RawRuleProvider {
     #[serde(rename = "type")]
-    pub provider_type: String, // "http" | "file"
+    pub provider_type: String, // "http" | "file" | "inline"
     pub behavior: String,       // "domain" | "ipcidr" | "classical"
-    pub format: Option<String>, // "yaml" (default) | "text"
+    pub format: Option<String>, // "yaml" (default) | "text" | "mrs"
     pub url: Option<String>,
     pub path: Option<String>,
     pub interval: Option<u64>,
+    /// Inline payload: list of rule strings (only for type=inline).
+    pub payload: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

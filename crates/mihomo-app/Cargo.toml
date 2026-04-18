@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-config = { workspace = true }
+mihomo-rules = { workspace = true }
 mihomo-tunnel = { workspace = true }
 mihomo-listener = { workspace = true }
 mihomo-dns = { workspace = true }

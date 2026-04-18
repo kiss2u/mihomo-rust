@@ -11,14 +11,16 @@ pub struct MixedListener {
     tunnel: Tunnel,
     listen_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
+    name: String,
 }
 
 impl MixedListener {
-    pub fn new(tunnel: Tunnel, listen_addr: SocketAddr) -> Self {
+    pub fn new(tunnel: Tunnel, listen_addr: SocketAddr, name: String) -> Self {
         Self {
             tunnel,
             listen_addr,
             sniffer: None,
+            name,
         }
     }
 
@@ -31,7 +33,7 @@ impl MixedListener {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(self.listen_addr).await?;
-        info!("Mixed listener on {}", self.listen_addr);
+        info!("Mixed listener '{}' on {}", self.name, self.listen_addr);
 
         loop {
             let (stream, src_addr) = match listener.accept().await {
@@ -44,8 +46,10 @@ impl MixedListener {
 
             let tunnel = self.tunnel.clone();
             let sniffer = self.sniffer.clone();
+            let name = self.name.clone();
+            let port = self.listen_addr.port();
             tokio::spawn(async move {
-                handle_connection(tunnel, stream, src_addr, sniffer).await;
+                handle_connection(tunnel, stream, src_addr, sniffer, name, port).await;
             });
         }
     }
@@ -56,6 +60,8 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
+    name: String,
+    port: u16,
 ) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
@@ -70,9 +76,9 @@ async fn handle_connection(
 
     if peek[0] == 0x05 {
         // SOCKS5
-        socks5::handle_socks5(&tunnel, stream, src_addr, sniffer.as_deref()).await;
+        socks5::handle_socks5(&tunnel, stream, src_addr, sniffer.as_deref(), &name, port).await;
     } else {
         // HTTP proxy
-        http_proxy::handle_http(&tunnel, stream, src_addr, sniffer.as_deref()).await;
+        http_proxy::handle_http(&tunnel, stream, src_addr, sniffer.as_deref(), &name, port).await;
     }
 }

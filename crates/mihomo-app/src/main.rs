@@ -412,6 +412,9 @@ async fn run(
         Arc::new(map)
     };
 
+    // Rule providers in shared state for runtime refresh and API exposure.
+    let rule_providers = Arc::new(RwLock::new(config.rule_providers));
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(config.dns.resolver.clone());
     tunnel.set_mode(config.general.mode);
@@ -438,12 +441,42 @@ async fn run(
             raw_config.clone(),
             log_tx.clone(),
             proxy_providers.clone(),
+            rule_providers.clone(),
+            config.listeners.named.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {
                 error!("API server error: {}", e);
             }
         });
+    }
+
+    // Spawn background refresh tasks for HTTP rule-providers with interval > 0.
+    {
+        let providers_snap: Vec<_> = rule_providers
+            .read()
+            .values()
+            .filter(|p| {
+                p.interval > 0
+                    && p.provider_type == mihomo_config::rule_provider::ProviderType::Http
+            })
+            .cloned()
+            .collect();
+        for provider in providers_snap {
+            let interval_secs = provider.interval;
+            tokio::spawn(async move {
+                let ctx = mihomo_rules::ParserContext::empty();
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                ticker.tick().await; // skip the immediate first tick
+                loop {
+                    ticker.tick().await;
+                    if let Err(e) = provider.refresh(&ctx).await {
+                        error!(provider = %provider.name, "background refresh failed: {:#}", e);
+                    }
+                }
+            });
+        }
     }
 
     // Start subscription background refresh task
@@ -460,53 +493,36 @@ async fn run(
     let sniffer_runtime = Arc::new(SnifferRuntime::new(config.sniffer));
 
     // Start listeners
-    let bind_addr = &config.listeners.bind_address;
+    use mihomo_config::ListenerType;
 
-    if let Some(port) = config.listeners.mixed_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("Mixed listener error: {}", e);
+    for nl in &config.listeners.named {
+        let addr: SocketAddr = format!("{}:{}", nl.listen, nl.port).parse()?;
+        match nl.listener_type {
+            ListenerType::Mixed | ListenerType::Http | ListenerType::Socks5 => {
+                let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
+                    .with_sniffer(sniffer_runtime.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = listener.run().await {
+                        error!("Listener error: {}", e);
+                    }
+                });
             }
-        });
-    }
-
-    if let Some(port) = config.listeners.socks_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("SOCKS listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(port) = config.listeners.http_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener =
-            MixedListener::new(tunnel.clone(), addr).with_sniffer(sniffer_runtime.clone());
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("HTTP listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(port) = config.listeners.tproxy_port {
-        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-        // Pass enable_sni=false to TProxyListener::new (deprecated path);
-        // the SnifferRuntime takes over via with_sniffer.
-        let listener =
-            TProxyListener::new(tunnel.clone(), addr, false, config.listeners.routing_mark)
+            ListenerType::TProxy => {
+                let listener = TProxyListener::new(
+                    tunnel.clone(),
+                    addr,
+                    nl.tproxy_sni,
+                    config.listeners.routing_mark,
+                    nl.name.clone(),
+                )
                 .with_sniffer(sniffer_runtime.clone());
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("TProxy listener error: {}", e);
+                tokio::spawn(async move {
+                    if let Err(e) = listener.run().await {
+                        error!("TProxy listener error: {}", e);
+                    }
+                });
             }
-        });
+        }
     }
 
     info!("mihomo-rust is running");

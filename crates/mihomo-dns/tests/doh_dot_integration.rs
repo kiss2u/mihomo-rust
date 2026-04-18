@@ -18,10 +18,18 @@ use mihomo_trie::DomainTrie;
 #[ignore]
 async fn dot_resolves_example_com() {
     let main = vec![NameServerUrl::parse("tls://1.1.1.1:853#cloudflare-dns.com").unwrap()];
-    let resolver =
-        Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
-            .await
-            .expect("DoT resolver must build");
+    let resolver = Resolver::new_with_bootstrap(
+        main,
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("DoT resolver must build");
     let ip = resolver.resolve_ip("example.com").await;
     assert!(
         ip.is_some(),
@@ -34,10 +42,18 @@ async fn dot_resolves_example_com() {
 #[ignore]
 async fn doh_resolves_example_com() {
     let main = vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
-    let resolver =
-        Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
-            .await
-            .expect("DoH resolver must build");
+    let resolver = Resolver::new_with_bootstrap(
+        main,
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("DoH resolver must build");
     let ip = resolver.resolve_ip("example.com").await;
     assert!(ip.is_some(), "expected an answer for example.com via DoH");
 }
@@ -48,10 +64,18 @@ async fn doh_resolves_example_com() {
 #[ignore]
 async fn dot_bogus_sni_fails_cert_validation() {
     let main = vec![NameServerUrl::parse("tls://1.1.1.1:853#wrong.example").unwrap()];
-    let resolver =
-        Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
-            .await
-            .expect("resolver builds even with bad SNI");
+    let resolver = Resolver::new_with_bootstrap(
+        main,
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("resolver builds even with bad SNI");
     let ip = resolver.resolve_ip("example.com").await;
     assert!(
         ip.is_none(),
@@ -65,10 +89,18 @@ async fn dot_bogus_sni_fails_cert_validation() {
 #[ignore]
 async fn doh_bogus_sni_fails_cert_validation() {
     let main = vec![NameServerUrl::parse("https://1.1.1.1/dns-query#wrong.example").unwrap()];
-    let resolver =
-        Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
-            .await
-            .expect("resolver builds even with bad SNI");
+    let resolver = Resolver::new_with_bootstrap(
+        main,
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("resolver builds even with bad SNI");
     let ip = resolver.resolve_ip("example.com").await;
     assert!(
         ip.is_none(),
@@ -84,10 +116,18 @@ async fn doh_bogus_sni_fails_cert_validation() {
 async fn dot_hostname_with_bootstrap_resolves() {
     let main = vec![NameServerUrl::parse("tls://dns.google:853#dns.google").unwrap()];
     let default_ns = vec![NameServerUrl::parse("8.8.8.8").unwrap()];
-    let resolver =
-        Resolver::new_with_bootstrap(main, vec![], default_ns, DnsMode::Normal, DomainTrie::new())
-            .await
-            .expect("bootstrap + DoT resolver must build");
+    let resolver = Resolver::new_with_bootstrap(
+        main,
+        vec![],
+        default_ns,
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+        None,
+        None,
+    )
+    .await
+    .expect("bootstrap + DoT resolver must build");
     let ip = resolver.resolve_ip("example.com").await;
     assert!(
         ip.is_some(),

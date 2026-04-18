@@ -8,6 +8,7 @@ use mihomo_dns::Resolver;
 use mihomo_trie::DomainTrie;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
@@ -34,6 +35,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
 
@@ -54,6 +56,8 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         raw_config: Arc::new(RwLock::new(raw)),
         log_tx: test_log_tx(),
         proxy_providers: Arc::new(DashMap::new()),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
     })
 }
 
@@ -67,6 +71,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
     let raw = test_raw_config();
@@ -85,6 +90,8 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         raw_config: Arc::new(RwLock::new(raw)),
         log_tx: test_log_tx(),
         proxy_providers: Arc::new(DashMap::new()),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
     })
 }
 
@@ -1500,6 +1507,7 @@ mod delay_support {
             vec![],
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
         ));
         let tunnel = Tunnel::new(resolver);
         tunnel.update_proxies(proxies);
@@ -1515,6 +1523,8 @@ mod delay_support {
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             log_tx: tokio::sync::broadcast::channel(16).0,
             proxy_providers: Arc::new(DashMap::new()),
+            rule_providers: Arc::new(RwLock::new(HashMap::new())),
+            listeners: vec![],
         })
     }
 
@@ -1548,6 +1558,7 @@ mod delay_support {
             vec![],
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
         ));
         let tunnel = Tunnel::new(resolver);
         tunnel.update_proxies(proxies);
@@ -1563,6 +1574,8 @@ mod delay_support {
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             log_tx: tokio::sync::broadcast::channel(16).0,
             proxy_providers: Arc::new(DashMap::new()),
+            rule_providers: Arc::new(RwLock::new(HashMap::new())),
+            listeners: vec![],
         })
     }
 }

@@ -8,7 +8,10 @@ pub mod final_rule;
 pub mod geoip;
 pub mod geosite;
 pub mod geosite_rule;
+pub mod in_name;
 pub mod in_port;
+pub mod in_type;
+pub mod in_user;
 pub mod ip_asn;
 pub mod ip_suffix;
 pub mod ipcidr;
@@ -27,7 +30,7 @@ pub mod uid;
 
 pub use parser::{parse_rule, ParserContext};
 pub use rule_set::{
-    build_rule_set, ClassicalRuleSet, DomainRuleSet, IpCidrRuleSet, RuleSet, RuleSetBehavior,
-    RuleSetFormat,
+    build_rule_set, build_rule_set_from_mrs, is_mrs_bytes, ClassicalRuleSet, DomainRuleSet,
+    IpCidrRuleSet, RuleSet, RuleSetBehavior, RuleSetFormat,
 };
 pub use rule_set_rule::RuleSetRule;

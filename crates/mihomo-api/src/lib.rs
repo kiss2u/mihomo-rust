@@ -4,9 +4,12 @@ pub mod ui;
 
 use dashmap::DashMap;
 use log_stream::LogMessage;
-use mihomo_config::{proxy_provider::ProxyProvider, raw::RawConfig};
+use mihomo_config::{
+    proxy_provider::ProxyProvider, raw::RawConfig, rule_provider::RuleProvider, NamedListener,
+};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -20,9 +23,12 @@ pub struct ApiServer {
     raw_config: Arc<RwLock<RawConfig>>,
     log_tx: broadcast::Sender<LogMessage>,
     proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
+    rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+    listeners: Vec<NamedListener>,
 }
 
 impl ApiServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tunnel: Tunnel,
         listen_addr: SocketAddr,
@@ -31,6 +37,8 @@ impl ApiServer {
         raw_config: Arc<RwLock<RawConfig>>,
         log_tx: broadcast::Sender<LogMessage>,
         proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
+        rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+        listeners: Vec<NamedListener>,
     ) -> Self {
         Self {
             tunnel,
@@ -40,6 +48,8 @@ impl ApiServer {
             raw_config,
             log_tx,
             proxy_providers,
+            rule_providers,
+            listeners,
         }
     }
 
@@ -51,6 +61,8 @@ impl ApiServer {
             raw_config: self.raw_config.clone(),
             log_tx: self.log_tx.clone(),
             proxy_providers: self.proxy_providers.clone(),
+            rule_providers: self.rule_providers.clone(),
+            listeners: self.listeners.clone(),
         });
 
         let app = routes::create_router(state);

@@ -12,6 +12,8 @@ use mihomo_common::TunnelMode;
 use mihomo_config::{
     proxy_provider::ProxyProvider,
     raw::{RawConfig, RawProxyGroup, RawSubscription},
+    rule_provider::RuleProvider,
+    NamedListener,
 };
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
@@ -37,6 +39,9 @@ pub struct AppState {
     pub log_tx: broadcast::Sender<LogMessage>,
     /// Live proxy-provider registry — refreshed by background task and PUT endpoint.
     pub proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
+    pub rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+    /// Snapshot of active named listeners (read-only, startup-time only in M1).
+    pub listeners: Vec<NamedListener>,
 }
 
 impl AppState {
@@ -196,6 +201,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/providers/proxies/{name}/healthcheck",
             get(provider_healthcheck),
         )
+        // Rule providers
+        .route("/providers/rules", get(get_rule_providers))
+        .route(
+            "/providers/rules/{name}",
+            get(get_rule_provider).put(refresh_rule_provider),
+        )
+        // Listeners (read-only list)
+        .route("/listeners", get(get_listeners))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
@@ -1491,4 +1504,97 @@ async fn provider_healthcheck(
     }
 
     Json(serde_json::Value::Object(results)).into_response()
+}
+
+// ── Rule Providers ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct RuleProviderInfo {
+    name: String,
+    #[serde(rename = "type")]
+    provider_type: String,
+    behavior: String,
+    #[serde(rename = "ruleCount")]
+    rule_count: usize,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+    #[serde(rename = "vehicleType")]
+    vehicle_type: String,
+}
+
+impl RuleProviderInfo {
+    fn from_provider(p: &Arc<RuleProvider>) -> Self {
+        Self {
+            name: p.name.clone(),
+            provider_type: p.provider_type.to_string(),
+            behavior: p.behavior.to_string(),
+            rule_count: p.rule_count(),
+            updated_at: p.updated_at_secs(),
+            vehicle_type: p.vehicle.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RuleProvidersResponse {
+    providers: HashMap<String, RuleProviderInfo>,
+}
+
+async fn get_rule_providers(State(state): State<Arc<AppState>>) -> Json<RuleProvidersResponse> {
+    let providers = state.rule_providers.read();
+    let map: HashMap<String, RuleProviderInfo> = providers
+        .iter()
+        .map(|(name, p): (&String, &Arc<RuleProvider>)| {
+            (name.clone(), RuleProviderInfo::from_provider(p))
+        })
+        .collect();
+    Json(RuleProvidersResponse { providers: map })
+}
+
+async fn get_rule_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<RuleProviderInfo>, StatusCode> {
+    let providers = state.rule_providers.read();
+    let p = providers.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(RuleProviderInfo::from_provider(p)))
+}
+
+async fn refresh_rule_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> StatusCode {
+    let provider = {
+        let providers = state.rule_providers.read();
+        providers.get(&name).cloned()
+    };
+    let Some(p) = provider else {
+        return StatusCode::NOT_FOUND;
+    };
+    let ctx = mihomo_rules::ParserContext::empty();
+    match p.refresh(&ctx).await {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            tracing::warn!(provider = %name, "rule-provider refresh failed: {:#}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
+// ── Listeners ─────────────────────────────────────────────────────────
+
+async fn get_listeners(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = state
+        .listeners
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "name": l.name,
+                "type": l.listener_type.to_string(),
+                "port": l.port,
+                "listen": l.listen,
+            })
+        })
+        .collect();
+    Json(serde_json::json!(items))
 }

@@ -77,7 +77,23 @@ impl DnsServer {
             return Self::build_nxdomain(id, data);
         }
 
-        // Resolve using our resolver
+        // Check hosts trie first. If the domain is present in the hosts table
+        // but has no IPs of the queried family, return NOERROR with zero answers
+        // rather than NXDOMAIN — clients may retry on NXDOMAIN but not on an
+        // empty-answer NOERROR response.
+        if let Some(all_ips) = resolver.lookup_hosts_all(&domain) {
+            let ip = if qtype == 1 {
+                all_ips.iter().find(|ip| ip.is_ipv4()).copied()
+            } else {
+                all_ips.iter().find(|ip| ip.is_ipv6()).copied()
+            };
+            return match ip {
+                Some(addr) => Self::build_response(id, data, &domain, qtype, addr),
+                None => Self::build_noerror_empty(id, data),
+            };
+        }
+
+        // Resolve using our resolver (cache + upstream).
         let ip = if qtype == 1 {
             resolver.lookup_ipv4(&domain).await
         } else {
@@ -177,6 +193,36 @@ impl DnsServer {
         // Header
         response.extend_from_slice(&id.to_be_bytes());
         response.extend_from_slice(&[0x81, 0x83]); // Flags: response, NXDOMAIN
+        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+        response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+
+        // Copy question section
+        let question_start = 12;
+        let mut pos = question_start;
+        while pos < query.len() && query[pos] != 0 {
+            pos += 1 + query[pos] as usize;
+        }
+        pos += 5;
+        if pos <= query.len() {
+            response.extend_from_slice(&query[question_start..pos]);
+        }
+
+        Ok(response)
+    }
+
+    /// NOERROR with zero answers: hosts entry matched but no IPs of the queried
+    /// address family. Clients must not retry on an empty-answer NOERROR.
+    fn build_noerror_empty(
+        id: u16,
+        query: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut response = Vec::with_capacity(512);
+
+        // Header: NOERROR (rcode=0), QR=1, RD=1, RA=1
+        response.extend_from_slice(&id.to_be_bytes());
+        response.extend_from_slice(&[0x81, 0x80]); // Flags: response, NOERROR
         response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
         response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0

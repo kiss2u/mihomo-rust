@@ -30,6 +30,9 @@ pub enum RuleType {
     IpSuffix,
     IpAsn,
     SubRule,
+    InName,
+    InType,
+    InUser,
 }
 
 impl RuleType {
@@ -61,6 +64,9 @@ impl RuleType {
             RuleType::IpSuffix => "IP-SUFFIX",
             RuleType::IpAsn => "IP-ASN",
             RuleType::SubRule => "SUB-RULE",
+            RuleType::InName => "IN-NAME",
+            RuleType::InType => "IN-TYPE",
+            RuleType::InUser => "IN-USER",
         }
     }
 }
@@ -94,6 +100,9 @@ impl fmt::Display for RuleType {
             RuleType::IpSuffix => write!(f, "IP-SUFFIX"),
             RuleType::IpAsn => write!(f, "IP-ASN"),
             RuleType::SubRule => write!(f, "SUB-RULE"),
+            RuleType::InName => write!(f, "IN-NAME"),
+            RuleType::InType => write!(f, "IN-TYPE"),
+            RuleType::InUser => write!(f, "IN-USER"),
         }
     }
 }
