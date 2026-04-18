@@ -10,7 +10,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::warn;
 
-pub async fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
+pub async fn parse_dns(
+    raw: &RawConfig,
+    mmdb_path: Option<&std::path::Path>,
+) -> Result<DnsConfig, anyhow::Error> {
     let dns = match &raw.dns {
         Some(dns) if dns.enable.unwrap_or(false) => dns,
         _ => {
@@ -68,7 +71,10 @@ pub async fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
     let fallback_filter = if fallback_urls.is_empty() {
         None
     } else {
-        Some(build_fallback_filter(dns.fallback_filter.as_ref())?)
+        Some(build_fallback_filter(
+            dns.fallback_filter.as_ref(),
+            mmdb_path,
+        )?)
     };
 
     let resolver = Resolver::new_with_bootstrap(
@@ -195,6 +201,7 @@ fn needs_hostname_bootstrap(url: &NameServerUrl) -> Option<&str> {
 /// `warn!`. Class B per ADR-0002: NOT a startup error.
 fn build_fallback_filter(
     raw: Option<&crate::raw::RawFallbackFilter>,
+    explicit_mmdb_path: Option<&std::path::Path>,
 ) -> Result<FallbackFilter, anyhow::Error> {
     let geoip = raw.and_then(|f| f.geoip).unwrap_or(true);
     let geoip_code = raw
@@ -228,7 +235,9 @@ fn build_fallback_filter(
 
     // Attempt to load GeoIP MMDB for the geoip gate.
     let geoip_reader = if geoip {
-        let mmdb_path = crate::default_geoip_path();
+        let mmdb_path = explicit_mmdb_path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::default_geoip_path);
         match std::fs::read(&mmdb_path)
             .map_err(|e| format!("{e}"))
             .and_then(|b| maxminddb::Reader::from_source(b).map_err(|e| format!("{e}")))
@@ -544,7 +553,7 @@ mod tests {
     // Fallback-filter defaults when no raw config provided.
     #[test]
     fn build_fallback_filter_defaults() {
-        let ff = build_fallback_filter(None).unwrap();
+        let ff = build_fallback_filter(None, None).unwrap();
         assert_eq!(ff.geoip_code, "CN");
         assert!(ff.ipcidr.is_empty());
         assert!(ff.domain.search("anything").is_none());
@@ -560,7 +569,7 @@ mod tests {
             ipcidr: Some(vec!["240.0.0.0/4".to_string()]),
             domain: None,
         };
-        let ff = build_fallback_filter(Some(&raw)).unwrap();
+        let ff = build_fallback_filter(Some(&raw), None).unwrap();
         let bogon: IpAddr = "240.1.2.3".parse().unwrap();
         let clean: IpAddr = "8.8.8.8".parse().unwrap();
         assert!(ff.ip_gated(&[bogon]));
@@ -578,7 +587,7 @@ mod tests {
             ipcidr: None,
             domain: Some(vec!["+.google.cn".to_string()]),
         };
-        let ff = build_fallback_filter(Some(&raw)).unwrap();
+        let ff = build_fallback_filter(Some(&raw), None).unwrap();
         assert!(ff.domain_gated("www.google.cn"));
         assert!(ff.domain_gated("google.cn"));
         assert!(!ff.domain_gated("www.google.com"));

@@ -5,13 +5,14 @@ use mihomo_api::ApiServer;
 use mihomo_config::load_config;
 use mihomo_config::proxy_provider::ProxyProvider;
 use mihomo_config::raw::RawConfig;
+use mihomo_dns::resolver::Resolver;
 use mihomo_dns::DnsServer;
 use mihomo_listener::{MixedListener, SnifferRuntime, TProxyListener};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(target_os = "linux")]
 const SERVICE_NAME: &str = "mihomo";
@@ -415,6 +416,9 @@ async fn run(
     // Rule providers in shared state for runtime refresh and API exposure.
     let rule_providers = Arc::new(RwLock::new(config.rule_providers));
 
+    // Keep a resolver clone for the auto-update task before it moves into the tunnel.
+    let resolver = config.dns.resolver.clone();
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(config.dns.resolver.clone());
     tunnel.set_mode(config.general.mode);
@@ -486,6 +490,17 @@ async fn run(
         let config_path = config_path.clone();
         tokio::spawn(async move {
             subscription_refresh_loop(raw_config, tunnel, config_path).await;
+        });
+    }
+
+    // Spawn geodata auto-update task if enabled.
+    if config.geodata.auto_update {
+        let geodata = config.geodata.clone();
+        let tunnel = tunnel.clone();
+        let raw_config = raw_config.clone();
+        let resolver = resolver.clone();
+        tokio::spawn(async move {
+            geodata_auto_update_loop(geodata, tunnel, raw_config, resolver).await;
         });
     }
 
@@ -606,5 +621,82 @@ async fn subscription_refresh_loop(
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
+/// Background task that periodically re-downloads geodata DBs (GeoIP, ASN,
+/// geosite) when `geodata.auto-update: true`. After each successful download
+/// the DB file is atomically replaced on disk, then rules are rebuilt in
+/// memory without restart.
+async fn geodata_auto_update_loop(
+    geo: mihomo_config::GeoDataConfig,
+    tunnel: Tunnel,
+    raw_config: Arc<RwLock<RawConfig>>,
+    resolver: Arc<Resolver>,
+) {
+    use mihomo_config::geodata::download_and_replace;
+
+    let interval = std::time::Duration::from_secs(geo.auto_update_interval as u64 * 3600);
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await; // skip the immediate first tick
+
+    // Resolve the target file paths once (explicit override or default discovery
+    // path so the next config load finds the updated file).
+    let mmdb_target = geo
+        .mmdb_path
+        .clone()
+        .unwrap_or_else(mihomo_config::default_geoip_path);
+    let asn_target = geo
+        .asn_path
+        .clone()
+        .unwrap_or_else(mihomo_config::default_asn_path);
+    let geosite_target = geo
+        .geosite_path
+        .clone()
+        .unwrap_or_else(mihomo_config::default_geosite_path);
+
+    loop {
+        ticker.tick().await;
+
+        let mut any_updated = false;
+
+        if let Err(e) = download_and_replace(&geo.mmdb_url, &mmdb_target).await {
+            warn!("geodata auto-update: GeoIP MMDB download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if let Err(e) = download_and_replace(&geo.asn_url, &asn_target).await {
+            warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if let Err(e) = download_and_replace(&geo.geosite_url, &geosite_target).await {
+            warn!("geodata auto-update: geosite download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if !any_updated {
+            warn!("geodata auto-update: all downloads failed; rules not reloaded");
+            continue;
+        }
+
+        // Rebuild rules with the newly downloaded DBs. Only rules are affected
+        // by geodata changes; proxies are unchanged.
+        let raw = raw_config.read().clone();
+        match mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(resolver.clone())) {
+            Ok((_proxies, new_rules)) => {
+                tunnel.update_rules(new_rules);
+                info!("geodata auto-update: rules reloaded with updated DBs");
+            }
+            Err(e) => {
+                warn!(
+                    "geodata auto-update: rule rebuild failed after DB download: {:#}",
+                    e
+                );
+            }
+        }
     }
 }
