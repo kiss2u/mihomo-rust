@@ -5,15 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["encrypted"]
+default = ["encrypted", "dns-server"]
 encrypted = ["hickory-resolver/tls-ring", "hickory-resolver/https-ring"]
+dns-server = ["dep:hickory-server"]
 
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
 tokio = { workspace = true }
 hickory-resolver = { workspace = true }
-hickory-server = { workspace = true }
+hickory-server = { workspace = true, optional = true }
 hickory-proto = { workspace = true }
 lru = { workspace = true }
 dashmap = { workspace = true }

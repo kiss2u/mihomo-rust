@@ -22,7 +22,17 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            # x86_64: informational only, no size gate
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           - target: aarch64-unknown-linux-musl
+            # aarch64: hard gate — release fails if minimal binary exceeds 8 MiB
+            minimal_budget_bytes: 8388608
+            minimal_soft_gate: false
+          - target: mipsel-unknown-linux-musl
+            # mipsel: soft gate — emit warning only, per ADR-0007 §1
+            minimal_budget_bytes: 7340032
+            minimal_soft_gate: true
     steps:
       - uses: actions/checkout@v4
 
@@ -42,8 +52,38 @@ jobs:
 
       - run: cargo install --locked cargo-zigbuild
 
-      - name: Build release binary (static musl)
+      - name: Build release binary (static musl, default features)
         run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin mihomo
+
+      - name: Build minimal release binary (stripped, for size check)
+        if: matrix.minimal_budget_bytes != 0
+        run: |
+          cargo zigbuild --release --locked \
+            --no-default-features --features minimal \
+            --target ${{ matrix.target }} \
+            --bin mihomo
+          # Copy minimal binary aside before default binary overwrites artifact
+          cp "target/${{ matrix.target }}/release/mihomo" \
+             "target/${{ matrix.target }}/release/mihomo-minimal"
+          llvm-strip "target/${{ matrix.target }}/release/mihomo-minimal" \
+            2>/dev/null || strip "target/${{ matrix.target }}/release/mihomo-minimal"
+
+      - name: Minimal binary size check
+        if: matrix.minimal_budget_bytes != 0
+        run: |
+          SIZE=$(stat -c%s "target/${{ matrix.target }}/release/mihomo-minimal")
+          BUDGET=${{ matrix.minimal_budget_bytes }}
+          echo "Minimal binary size: ${SIZE} bytes (budget: ${BUDGET} bytes)"
+          if [ "${SIZE}" -gt "${BUDGET}" ]; then
+            if [ "${{ matrix.minimal_soft_gate }}" = "true" ]; then
+              echo "::warning::${{ matrix.target }} minimal binary ${SIZE} bytes exceeds soft budget ${BUDGET} bytes (ADR-0007 §1)"
+            else
+              echo "::error::${{ matrix.target }} minimal binary ${SIZE} bytes exceeds hard budget ${BUDGET} bytes (ADR-0007 §2)"
+              exit 1
+            fi
+          else
+            echo "Size check passed: ${SIZE} <= ${BUDGET}"
+          fi
 
       - name: Package tarball
         id: pkg

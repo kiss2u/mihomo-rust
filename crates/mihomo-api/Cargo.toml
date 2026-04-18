@@ -7,9 +7,9 @@ rust-version.workspace = true
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-tunnel = { workspace = true }
-mihomo-dns = { workspace = true }
-mihomo-config = { workspace = true }
-mihomo-proxy = { workspace = true }
+mihomo-dns = { workspace = true, default-features = false }
+mihomo-config = { workspace = true, default-features = false }
+mihomo-proxy = { workspace = true, default-features = false }
 mihomo-rules = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
