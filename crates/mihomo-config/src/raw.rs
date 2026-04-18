@@ -60,6 +60,43 @@ pub struct RawDns {
     pub nameserver: Option<Vec<String>>,
     pub fallback: Option<Vec<String>>,
     pub fake_ip_filter: Option<Vec<String>>,
+    /// If false, the hosts trie lookup is skipped entirely at query time.
+    pub use_hosts: Option<bool>,
+    /// If true, `/etc/hosts` is read at startup and merged (lower priority than
+    /// `dns.hosts` config entries). No-op + warn on Windows.
+    pub use_system_hosts: Option<bool>,
+    /// Per-domain nameserver routing: each key is an exact domain or a `+.`
+    /// wildcard prefix; value is a single server URL or a list of URLs.
+    pub nameserver_policy: Option<HashMap<String, RawNspValue>>,
+    /// Controls when the `fallback:` nameservers replace the primary result.
+    pub fallback_filter: Option<RawFallbackFilter>,
+}
+
+/// A nameserver-policy value: either a single URL string or a list of URLs.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum RawNspValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RawNspValue {
+    pub fn as_urls(&self) -> Vec<&str> {
+        match self {
+            RawNspValue::One(s) => vec![s.as_str()],
+            RawNspValue::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// `fallback-filter` YAML block.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawFallbackFilter {
+    pub geoip: Option<bool>,
+    pub geoip_code: Option<String>,
+    pub ipcidr: Option<Vec<String>>,
+    pub domain: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

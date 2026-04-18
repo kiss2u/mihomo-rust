@@ -29,6 +29,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
 
@@ -61,6 +62,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
     let raw = test_raw_config();
@@ -1493,6 +1495,7 @@ mod delay_support {
             vec![],
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
         ));
         let tunnel = Tunnel::new(resolver);
         tunnel.update_proxies(proxies);
@@ -1540,6 +1543,7 @@ mod delay_support {
             vec![],
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
         ));
         let tunnel = Tunnel::new(resolver);
         tunnel.update_proxies(proxies);
