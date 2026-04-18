@@ -91,20 +91,14 @@ pub fn match_rules(
     };
 
     // Determine the scan ceiling: if trie found a hit at index T, we only
-    // need to check rules[0..T] for an earlier match.
+    // need to check rules[0..T] for an earlier match.  The trie returns the
+    // most-specific match (exact > wildcard), NOT the minimum-index rule across
+    // all patterns that match this host.  A broader rule at index < T (e.g.
+    // DOMAIN-SUFFIX "example.com" at idx 0 before DOMAIN "sub.example.com" at
+    // idx 1) can still match, so we cannot skip domain rules in the prefix scan.
     let scan_end = trie_hit.map_or(rules.len(), |(t, _)| t);
 
-    // When the trie hit, skip DOMAIN/DOMAIN-SUFFIX rules in the prefix scan —
-    // the trie guarantees no domain rule at index < T matches this host.
-    let skip_domain = trie_hit.is_some();
-
     for rule in &rules[..scan_end] {
-        if skip_domain {
-            match rule.rule_type() {
-                RuleType::Domain | RuleType::DomainSuffix => continue,
-                _ => {}
-            }
-        }
         if let Some(adapter_name) = rule.match_and_resolve(meta, &helper) {
             return Some(MatchResult {
                 adapter_name,
@@ -296,5 +290,37 @@ mod tests {
         };
         let result = match_rules(&meta, &rules, &index).expect("must match");
         assert_eq!(result.adapter_name, "Direct");
+    }
+
+    #[test]
+    fn broader_domain_rule_before_specific_wins_first_match() {
+        // Regression for the skip_domain correctness bug (ADR-0002 Class A):
+        //
+        // rules[0] = DOMAIN-SUFFIX "example.com" → "Broad"   (matches any *.example.com)
+        // rules[1] = DOMAIN        "sub.example.com" → "Specific"
+        //
+        // Trie returns T=1 (DOMAIN exact-match is priority-1 in trie.rs).
+        // Correct result: scan rules[0..1] → rules[0] DomainSuffix matches → "Broad".
+        // Buggy result (if skip_domain were active): skip rules[0], return trie hit → "Specific".
+        use mihomo_rules::domain::DomainRule;
+        use mihomo_rules::domain_suffix::DomainSuffixRule;
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("example.com", "Broad")),
+            Box::new(DomainRule::new("sub.example.com", "Specific")),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let index = DomainIndex::build(&rules);
+        let meta = Metadata {
+            host: "sub.example.com".to_string(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = match_rules(&meta, &rules, &index).expect("must match");
+        assert_eq!(
+            result.adapter_name, "Broad",
+            "first-match-wins: broader rule at lower index must take precedence"
+        );
+        assert_eq!(result.rule_type.as_str(), "DOMAIN-SUFFIX");
     }
 }
