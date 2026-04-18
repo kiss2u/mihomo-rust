@@ -1,12 +1,12 @@
 # Spec: VLESS outbound
 
-Status: Draft (pm 2026-04-11, awaiting architect review)
+Status: Approved (architect 2026-04-18, amendments applied)
 Owner: pm
 Tracks roadmap item: **M1.B-2**
-Depends on: **M1.A-1** (tls layer), **M1.A-2** (ws layer); same as VMess.
-See also: [`docs/specs/proxy-vmess.md`](proxy-vmess.md) — VLESS reuses
-the transport chain, config parser structure, and `transport_chain`
-builder helper introduced there.
+Depends on: **M1.A-1** (tls layer), **M1.A-2** (ws layer).
+See also: [`docs/specs/proxy-vmess.md`](proxy-vmess.md) — DROPPED;
+preserved as design record only. VLESS defines its own `build_chain`
+inline and does not depend on the VMess spec.
 Related gap-analysis row: VLESS outbound (§1, **Gap**).
 
 ## Motivation
@@ -38,15 +38,13 @@ In scope:
    cipher. Requires outer TLS to be safe; we do **not** gate on
    `tls: true` but we warn loudly if both `tls: false` and no
    outer transport enforce encryption.
-3. `flow: xtls-rprx-vision` — XTLS-Vision TLS-splice mode. Optional
-   in this PR; if bandwidth is tight, defer to M1.B-2b and land
-   plain VLESS first. See §XTLS-Vision.
+3. `flow: xtls-rprx-vision` — XTLS-Vision TLS-splice mode. Bundled
+   in M1.B-2 (architect 2026-04-18). See §XTLS-Vision.
 4. TCP outbound. `network: tcp | ws | grpc | h2 | httpupgrade` via
-   the `mihomo-transport` chain (reuses the `transport_chain` builder
-   introduced by the VMess spec).
-5. UDP-over-TCP (VLESS `cmd: 0x02`). Required for DNS and QUIC-over-
-   VLESS relay; implementation is identical to VMess's UDP path once
-   the header is sent.
+   the `mihomo-transport` chain (`vless::transport::build_chain` in
+   `vless.rs`).
+5. UDP-over-TCP (VLESS `cmd: 0x02`). Implemented inline in
+   `vless/conn.rs`.
 6. YAML config parser for `proxies: [{ type: vless }]` matching
    upstream's field set.
 7. Integration with `ProxyHealth` (api-delay-endpoints spec) and
@@ -208,8 +206,10 @@ response or the TLS layer is missing.
 
 ### Address encoding
 
-Identical to VMess `addr.rs` — reuse that module or import it when
-it exists. Do not duplicate:
+Inline ~80 LOC in `vless/header.rs`. When a second consumer appears
+(e.g. VMess), promote to `mihomo-proxy/src/common/addr.rs` — not
+`mihomo-common`, which is for core traits, not protocol encoding
+details. Do not create the shared module pre-emptively.
 
 | addr_type | Layout |
 |-----------|--------|
@@ -330,20 +330,18 @@ and the vision-splice logic orthogonal.
 
 ```
 crates/mihomo-proxy/src/
-  vless.rs            // VlessAdapter + config parsing (~180 LOC)
+  vless.rs            // VlessAdapter + config parsing + transport::build_chain (~200 LOC)
   vless/
   ├── mod.rs          // pub use
-  ├── header.rs       // request/response header encode/decode (~120 LOC)
+  ├── header.rs       // request/response header encode/decode + addr encoding (~200 LOC)
   ├── conn.rs         // VlessConn (TCP + UDP wrappers) (~120 LOC)
   └── vision.rs       // VisionConn — Vision-mode splice wrapper (~200 LOC)
 ```
 
-Address encoding lives in `vless/header.rs` but delegates to
-`vmess::addr` when that module exists, or duplicates the ~80 LOC
-until the VMess PR lands (whichever comes first). Engineer: add a
-`// TODO: deduplicate with vmess::addr once M1.B-1 lands` comment
-rather than creating a shared `proxy/addr.rs` pre-emptively — let the
-refactor happen naturally when both exist.
+Address encoding lives inline in `vless/header.rs` (~80 LOC). When a
+second consumer appears, promote to `mihomo-proxy/src/common/addr.rs`
+(not `mihomo-common` — this is a protocol encoding detail, not a core
+trait). No pre-emptive shared module.
 
 Total ~500 LOC for plain VLESS, ~700 LOC with Vision. Substantially
 smaller than VMess because there is no crypto.
@@ -397,9 +395,9 @@ impl ProxyAdapter for VlessAdapter {
 
 ### Config parser
 
-`mihomo-config/src/proxy_parser.rs::parse_vless` reuses the
-`transport_chain::build(network, opts)` helper introduced by the
-VMess spec. The `flow` field is parsed to `Option<VlessFlow>` with
+`mihomo-config/src/proxy_parser.rs::parse_vless` calls
+`vless::transport::build_chain(network, opts)` defined inline in
+`vless.rs`. The `flow` field is parsed to `Option<VlessFlow>` with
 the hard-errors listed in §Divergences.
 
 `reality-opts` presence in the YAML struct causes a hard parse error
@@ -453,8 +451,7 @@ A PR implementing this spec must:
    pattern as `vmess_integration.rs`.
 4. UDP relay works for a DNS query through the same `xray` server.
 5. `flow: xtls-rprx-vision` round-trips against an xray server with
-   Vision enabled (integration test, skip-if-absent). If Vision is
-   deferred to M1.B-2b, this criterion moves to that PR.
+   Vision enabled (integration test, skip-if-absent).
 6. `flow: xtls-rprx-direct` and `flow: xtls-rprx-splice` hard-error
    at parse time with the "use xtls-rprx-vision" message. Class A per
    ADR-0002.
@@ -559,7 +556,7 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
   absent.
 - `vless_vision_roundtrip` — local xray with `flow: xtls-rprx-vision`
   enabled. Assert round-trip with Vision-mode detection fired (log
-  capture or internal counter). Skip if Vision deferred to M1.B-2b.
+  capture or internal counter). Skip if xray absent.
 - `vless_wrong_uuid_fails_cleanly` — assert EOF on first read is
   surfaced as a named error, not a raw panic or opaque `UnexpectedEof`.
 - `vless_delay_probe_populates_history` — same cross-spec gate as
@@ -582,21 +579,20 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
       `crates/mihomo-proxy/Cargo.toml`. No new crypto deps for `vless`;
       `vless-vision` depends only on standard tokio IO.
 - [ ] Implement `vless/header.rs`: request encoder (addon + command
-      + port + addr), response decoder, addr encoding (or import from
-      `vmess::addr` once that PR lands). Add the upstream-cite comment
+      + port + addr), response decoder, addr encoding inline (~80 LOC).
+      Add the upstream-cite comment
       `// upstream: transport/vless/encoding.go::EncodeRequestHeader`.
 - [ ] Implement `vless/conn.rs`: `VlessConn` wrapping a `Box<dyn Stream>`,
       writing the request header on construction, reading and discarding
       the response header, then pass-through `AsyncRead + AsyncWrite`.
 - [ ] Implement `vless/vision.rs` (behind `vless-vision` feature):
-      `VisionConn` wrapping `VlessConn`; peek-first-3-bytes, detect
+      `VisionConn` wrapping `VlessConn`; peek-first-5-bytes, detect
       ClientHello, send padding header, send full ClientHello, then
       splice. Add the upstream-cite comment
       `// upstream: transport/vless/vision/vision.go`.
 - [ ] Implement `VlessAdapter` in `vless.rs` composing the above with
-      the `mihomo-transport` chain. Reuse `transport_chain::build`
-      from the VMess spec — if VMess PR has not landed yet, copy the
-      builder and leave a TODO to dedup.
+      the `mihomo-transport` chain. Define `vless::transport::build_chain`
+      inline in `vless.rs` (VLESS is the first M1 consumer of this pattern).
 - [ ] Register `AdapterType::Vless` in
       `crates/mihomo-common/src/adapter_type.rs`.
 - [ ] Wire YAML parsing in `mihomo-config/src/proxy_parser.rs`:
@@ -615,36 +611,23 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
       and `vision.rs`: `// UPSTREAM: vless@<sha>` — same pattern as
       transport-layer test plan.
 - [ ] Update `docs/roadmap.md` M1.B-2 row with the merged PR link.
-- [ ] If Vision is split into M1.B-2b: open a follow-up task
-      "M1.B-2b: XTLS-Vision for VLESS" and reference it from the
-      `vless-vision` feature gate warn message.
 
-## Resolved questions
+## Resolved questions (architect sign-off 2026-04-18)
 
-*(none yet — this spec is a first draft awaiting architect review)*
+1. **Addr-encoding dedup → inline, no pre-emptive shared module.**
+   Inline ~80 LOC in `vless/header.rs`. When a second consumer appears,
+   promote to `mihomo-proxy/src/common/addr.rs` — not `mihomo-common`
+   (protocol encoding detail, not a core trait). VLESS is the first
+   consumer; create the shared module when the second appears.
 
-## Open questions (architect input requested)
+2. **Vision split vs. bundle → bundle in M1.B-2.**
+   Vision is ~200 extra LOC with zero new dependencies. "VLESS without
+   Vision" is not a useful unit to ship for real users (Vision is why
+   people choose VLESS over VMess). Bundled.
 
-1. **Addr-encoding dedup.** VMess and VLESS share identical address
-   encoding. The spec says "delegate or duplicate"; preference is to
-   wait for the VMess PR to land and deduplicate in the VLESS PR.
-   But if both land simultaneously (unlikely but possible), where
-   should the shared module live — `mihomo-proxy/src/common/addr.rs`
-   or `mihomo-common`? My lean: `mihomo-proxy/src/common/addr.rs` —
-   it is a protocol-specific encoding detail, not a core trait. Flag
-   for your call if VMess and VLESS PRs overlap.
-
-2. **Vision split vs. bundle.** Same tradeoff as VMess `vmess-legacy`.
-   My lean: bundle Vision in the same PR — it is ~200 extra LOC, zero
-   new dependencies, and "VLESS without Vision" is not a useful unit
-   to ship for real users (Vision is why people choose VLESS over
-   VMess). But if the PR is getting large from the transport-chain
-   work, split is fine.
-
-3. **UDP + Vision interaction.** Vision is defined for TCP only
-   (inner-TLS detection does not apply to UDP datagrams). Should
-   `VlessAdapter::dial_udp` silently ignore `flow: xtls-rprx-vision`
-   and use plain `VlessConn`, or hard-error? My lean: silently use
-   plain VlessConn for UDP even if flow is set — the user set Vision
-   for the TCP path and the UDP path is secondary. Document in a
-   comment. Flag if you disagree.
+3. **UDP + Vision → silent pass-through, warn-once at load.**
+   `VlessAdapter::dial_udp` silently ignores `flow: xtls-rprx-vision`
+   and uses plain `VlessConn`. Warn-once at config load (Class B per
+   ADR-0002 — see divergence row #7). UDP relay still routes correctly
+   with outer-TLS guarantees; Vision's inner-TLS splice is TCP-only by
+   definition.

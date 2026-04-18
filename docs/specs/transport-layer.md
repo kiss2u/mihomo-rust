@@ -1,6 +1,6 @@
 # Spec: Reusable transport layer (`mihomo-transport` crate)
 
-Status: Draft
+Status: Approved (architect 2026-04-18, amendments applied)
 Owner: pm
 Tracks roadmap item: **M1.A-1 … M1.A-4**
 Architecture source of truth: [ADR-0001](../adr/0001-mihomo-transport-crate.md)
