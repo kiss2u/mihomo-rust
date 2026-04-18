@@ -11,37 +11,49 @@ pub struct UdpSession {
     pub proxy_name: String,
 }
 
-pub type NatTable = Arc<DashMap<String, Arc<UdpSession>>>;
+// Direction A (ADR-0008 §6): key is a (src, dst) SocketAddr tuple — zero heap
+// allocation on the per-packet fast path, replacing the previous String built
+// by `format!("{}:{}", src, metadata.remote_address())`.
+pub type NatTable = Arc<DashMap<(SocketAddr, SocketAddr), Arc<UdpSession>>>;
 
 pub fn new_nat_table() -> NatTable {
     Arc::new(DashMap::new())
 }
 
-/// Handle a UDP packet: look up or create a NAT session
+/// Handle a UDP packet: look up or create a NAT session.
 pub async fn handle_udp(
     tunnel: &TunnelInner,
     data: &[u8],
     src: SocketAddr,
     mut metadata: Metadata,
 ) {
-    // Pre-resolve metadata (host -> real IP if rules need it)
+    // Pre-resolve metadata (host -> real IP if rules need it).
     tunnel.pre_resolve(&mut metadata).await;
 
-    let key = format!("{}:{}", src, metadata.remote_address());
+    // Build destination SocketAddr for the NAT key.
+    // pre_resolve() populates dst_ip for any hostname; if it is still None
+    // after that (resolution failure or unresolvable host), we cannot track
+    // the session and must discard the packet.
+    let Some(dst_ip) = metadata.dst_ip else {
+        warn!(
+            "UDP {}: dst_ip not resolved after pre_resolve — dropping",
+            metadata.remote_address()
+        );
+        return;
+    };
+    let dst_addr = SocketAddr::new(dst_ip, metadata.dst_port);
+    let key = (src, dst_addr);
 
-    // Check if we have an existing session
+    // Fast path: existing session — forward and return.
     if let Some(session) = tunnel.nat_table.get(&key) {
-        let dst_addr = metadata.remote_address();
-        if let Ok(addr) = dst_addr.parse::<SocketAddr>() {
-            if let Err(e) = session.conn.write_packet(data, &addr).await {
-                debug!("UDP write error for {}: {}", key, e);
-                tunnel.nat_table.remove(&key);
-            }
+        if let Err(e) = session.conn.write_packet(data, &dst_addr).await {
+            debug!("UDP write error for {} -> {}: {}", src, dst_addr, e);
+            tunnel.nat_table.remove(&key);
         }
         return;
     }
 
-    // New session: match rules and create proxy connection
+    // Slow path: new session — match rules and dial.
     let (proxy, rule_name, rule_payload) = match tunnel.resolve_proxy(&metadata) {
         Some(v) => v,
         None => {
@@ -52,8 +64,8 @@ pub async fn handle_udp(
 
     info!(
         "UDP {} --> {} match {}({}) using {}",
-        metadata.source_address(),
-        metadata.remote_address(),
+        src,
+        dst_addr,
         rule_name,
         rule_payload,
         proxy.name()
@@ -61,12 +73,9 @@ pub async fn handle_udp(
 
     match proxy.dial_udp(&metadata).await {
         Ok(conn) => {
-            let dst_addr = metadata.remote_address();
-            if let Ok(addr) = dst_addr.parse::<SocketAddr>() {
-                if let Err(e) = conn.write_packet(data, &addr).await {
-                    warn!("UDP initial write error: {}", e);
-                    return;
-                }
+            if let Err(e) = conn.write_packet(data, &dst_addr).await {
+                warn!("UDP initial write error for {} -> {}: {}", src, dst_addr, e);
+                return;
             }
             let session = Arc::new(UdpSession {
                 conn,
@@ -75,7 +84,7 @@ pub async fn handle_udp(
             tunnel.nat_table.insert(key, session);
         }
         Err(e) => {
-            warn!("UDP dial error for {}: {}", metadata.remote_address(), e);
+            warn!("UDP dial error for {} -> {}: {}", src, dst_addr, e);
         }
     }
 }
