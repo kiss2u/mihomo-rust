@@ -1,3 +1,4 @@
+use crate::sniffer::SnifferRuntime;
 use mihomo_common::{ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
@@ -5,8 +6,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
-pub async fn handle_http(tunnel: &Tunnel, mut stream: TcpStream, src_addr: SocketAddr) {
-    if let Err(e) = handle_http_inner(tunnel, &mut stream, src_addr).await {
+pub async fn handle_http(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
+) {
+    if let Err(e) = handle_http_inner(tunnel, &mut stream, src_addr, sniffer).await {
         debug!("HTTP proxy error from {}: {}", src_addr, e);
     }
 }
@@ -15,6 +21,7 @@ async fn handle_http_inner(
     tunnel: &Tunnel,
     stream: &mut TcpStream,
     src_addr: SocketAddr,
+    sniffer: Option<&SnifferRuntime>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Read the HTTP request line and headers byte by byte until we find \r\n\r\n.
     // We avoid BufReader to prevent borrow issues with the stream.
@@ -63,7 +70,7 @@ async fn handle_http_inner(
         // HTTPS CONNECT
         let (host, port) = parse_host_port(target, 443)?;
 
-        let metadata = Metadata {
+        let mut metadata = Metadata {
             network: Network::Tcp,
             conn_type: ConnType::Https,
             src_ip: Some(src_addr.ip()),
@@ -75,10 +82,16 @@ async fn handle_http_inner(
 
         debug!("HTTP CONNECT to {}:{}", host, port);
 
-        // Send 200 Connection Established
+        // Send 200 Connection Established — the client will then send its
+        // application data (e.g., TLS ClientHello) which we can peek at.
         stream
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
             .await?;
+
+        // Sniff TLS SNI from the client's TLS ClientHello (if applicable).
+        if let Some(rt) = sniffer {
+            rt.sniff(stream, &mut metadata).await;
+        }
 
         // Hand off to tunnel
         let inner = tunnel.inner();
@@ -120,7 +133,7 @@ async fn handle_http_inner(
         let url = target;
         let (host, port) = parse_url_host_port(url)?;
 
-        let metadata = Metadata {
+        let mut metadata = Metadata {
             network: Network::Tcp,
             conn_type: ConnType::Http,
             src_ip: Some(src_addr.ip()),
@@ -129,6 +142,14 @@ async fn handle_http_inner(
             dst_port: port,
             ..Default::default()
         };
+
+        // For plain HTTP, sniff_http on the already-read buffer so IP-literal
+        // destinations still benefit from Host-header routing.
+        if let Some(rt) = sniffer {
+            if let Some(sniffed) = mihomo_common::sniffer::sniff_http(&request_buf) {
+                rt.maybe_apply_sniff(&sniffed, &mut metadata);
+            }
+        }
 
         debug!("HTTP {} to {}:{}", method, host, port);
 

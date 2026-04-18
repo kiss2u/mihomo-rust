@@ -31,6 +31,7 @@ pub struct RawConfig {
     /// Static host → IP mappings, preferred over upstream DNS lookups.
     /// Values may be a single IP string or a list of IPs.
     pub hosts: Option<HashMap<String, HostsValue>>,
+    pub sniffer: Option<RawSniffer>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.
@@ -122,6 +123,28 @@ pub struct RawRuleProvider {
     pub url: Option<String>,
     pub path: Option<String>,
     pub interval: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawSniffer {
+    pub enable: Option<bool>,
+    /// Peek timeout in milliseconds (1–60000, default 100).
+    pub timeout: Option<u64>,
+    pub parse_pure_ip: Option<bool>,
+    pub override_destination: Option<bool>,
+    /// Accepted and ignored — we do not implement fake-ip.
+    pub force_dns_mapping: Option<bool>,
+    /// Protocol → port list map. Recognised keys: `TLS`, `HTTP`.
+    pub sniff: Option<HashMap<String, RawSniffProtocol>>,
+    pub force_domain: Option<Vec<String>>,
+    pub skip_domain: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawSniffProtocol {
+    pub ports: Option<Vec<u16>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

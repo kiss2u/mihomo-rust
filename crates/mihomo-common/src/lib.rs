@@ -7,6 +7,7 @@ pub mod metadata;
 pub mod network;
 pub mod process_lookup;
 pub mod rule;
+pub mod sniffer;
 pub mod tunnel_mode;
 
 pub use adapter::{DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
@@ -18,4 +19,5 @@ pub use metadata::Metadata;
 pub use network::Network;
 pub use process_lookup::{find_process, ProcessInfo};
 pub use rule::{Rule, RuleMatchHelper, RuleType};
+pub use sniffer::SnifferConfig;
 pub use tunnel_mode::TunnelMode;

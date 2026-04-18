@@ -1,19 +1,20 @@
 mod firewall;
 mod orig_dest;
-mod sni;
 
+use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use mihomo_common::{ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
 pub struct TProxyListener {
     tunnel: Tunnel,
     listen_addr: SocketAddr,
-    enable_sni: bool,
+    sniffer: Option<Arc<SnifferRuntime>>,
     routing_mark: Option<u32>,
 }
 
@@ -24,12 +25,36 @@ impl TProxyListener {
         enable_sni: bool,
         routing_mark: Option<u32>,
     ) -> Self {
+        // Deprecated `enable_sni` knob: synthesise a minimal sniffer config.
+        let sniffer = if enable_sni {
+            warn!(
+                "`enable_sni` is deprecated; migrate to the top-level `sniffer:` block. \
+                Accepting as `sniffer.enable: true, sniff.TLS.ports: [443]` for this release. \
+                Will be removed in a future version."
+            );
+            let cfg = mihomo_common::SnifferConfig {
+                enable: true,
+                tls_ports: vec![443],
+                http_ports: Vec::new(),
+                ..Default::default()
+            };
+            Some(Arc::new(SnifferRuntime::new(cfg)))
+        } else {
+            None
+        };
         Self {
             tunnel,
             listen_addr,
-            enable_sni,
+            sniffer,
             routing_mark,
         }
+    }
+
+    pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
+        if sniffer.is_enabled() {
+            self.sniffer = Some(sniffer);
+        }
+        self
     }
 
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -47,11 +72,11 @@ impl TProxyListener {
             let (stream, src_addr) = listener.accept().await?;
             let tunnel = self.tunnel.clone();
             let listen_addr = self.listen_addr;
-            let enable_sni = self.enable_sni;
+            let sniffer = self.sniffer.clone();
 
             tokio::spawn(async move {
                 if let Err(e) =
-                    handle_tproxy_conn(tunnel, stream, src_addr, listen_addr, enable_sni).await
+                    handle_tproxy_conn(tunnel, stream, src_addr, listen_addr, sniffer).await
                 {
                     debug!("TProxy connection error from {}: {}", src_addr, e);
                 }
@@ -106,7 +131,7 @@ async fn handle_tproxy_conn(
     mut stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     listen_addr: SocketAddr,
-    enable_sni: bool,
+    sniffer: Option<Arc<SnifferRuntime>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Recover the original destination address
     let orig_dst = orig_dest::get_original_dst(&stream, listen_addr)?;
@@ -116,44 +141,47 @@ async fn handle_tproxy_conn(
         return Err("original destination is the listen address (loop detected)".into());
     }
 
-    // Recover hostname:
-    // 1. Try SNI extraction for HTTPS (port 443)
-    // 2. Fall back to DNS snooping reverse lookup (IP → domain from recent DNS queries)
-    let mut hostname = if enable_sni && orig_dst.port() == 443 {
-        sni::extract_sni(&stream).await.unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    if hostname.is_empty() {
-        if let Some(domain) = tunnel.resolver().reverse_lookup(orig_dst.ip()) {
-            hostname = domain;
-        }
-    }
-
-    debug!(
-        "TProxy {} -> {} (host: {})",
-        src_addr,
-        orig_dst,
-        if hostname.is_empty() {
-            "<none>"
-        } else {
-            &hostname
-        }
-    );
-
-    let metadata = Metadata {
+    // Build initial metadata with IP-literal host for sniffer / DNS-snoop.
+    let mut metadata = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Redir,
         src_ip: Some(src_addr.ip()),
         src_port: src_addr.port(),
         dst_ip: Some(orig_dst.ip()),
         dst_port: orig_dst.port(),
-        host: hostname,
+        host: String::new(),
         in_name: "tproxy".to_string(),
         in_port: listen_addr.port(),
         ..Default::default()
     };
+
+    // Recover hostname:
+    // 1. SnifferRuntime (TLS SNI or HTTP Host) — replaces the old enable_sni path
+    // 2. Fall back to DNS snooping reverse lookup (IP → domain from recent DNS queries)
+    if let Some(rt) = sniffer.as_deref() {
+        rt.sniff(&stream, &mut metadata).await;
+    }
+
+    let mut hostname = metadata.sniff_host.clone();
+    if hostname.is_empty() {
+        if let Some(domain) = tunnel.resolver().reverse_lookup(orig_dst.ip()) {
+            hostname = domain;
+        }
+    }
+
+    // Prefer sniff_host for display but fall back to DNS-snooped hostname.
+    metadata.host = hostname;
+
+    debug!(
+        "TProxy {} -> {} (host: {})",
+        src_addr,
+        orig_dst,
+        if metadata.host.is_empty() {
+            "<none>"
+        } else {
+            &metadata.host
+        }
+    );
 
     let inner = tunnel.inner();
     let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {

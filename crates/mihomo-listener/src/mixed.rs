@@ -1,13 +1,16 @@
 use crate::http_proxy;
+use crate::sniffer::SnifferRuntime;
 use crate::socks5;
 use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 pub struct MixedListener {
     tunnel: Tunnel,
     listen_addr: SocketAddr,
+    sniffer: Option<Arc<SnifferRuntime>>,
 }
 
 impl MixedListener {
@@ -15,7 +18,15 @@ impl MixedListener {
         Self {
             tunnel,
             listen_addr,
+            sniffer: None,
         }
+    }
+
+    pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
+        if sniffer.is_enabled() {
+            self.sniffer = Some(sniffer);
+        }
+        self
     }
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -32,14 +43,20 @@ impl MixedListener {
             };
 
             let tunnel = self.tunnel.clone();
+            let sniffer = self.sniffer.clone();
             tokio::spawn(async move {
-                handle_connection(tunnel, stream, src_addr).await;
+                handle_connection(tunnel, stream, src_addr, sniffer).await;
             });
         }
     }
 }
 
-async fn handle_connection(tunnel: Tunnel, stream: tokio::net::TcpStream, src_addr: SocketAddr) {
+async fn handle_connection(
+    tunnel: Tunnel,
+    stream: tokio::net::TcpStream,
+    src_addr: SocketAddr,
+    sniffer: Option<Arc<SnifferRuntime>>,
+) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
     match stream.peek(&mut peek).await {
@@ -53,9 +70,9 @@ async fn handle_connection(tunnel: Tunnel, stream: tokio::net::TcpStream, src_ad
 
     if peek[0] == 0x05 {
         // SOCKS5
-        socks5::handle_socks5(&tunnel, stream, src_addr).await;
+        socks5::handle_socks5(&tunnel, stream, src_addr, sniffer.as_deref()).await;
     } else {
         // HTTP proxy
-        http_proxy::handle_http(&tunnel, stream, src_addr).await;
+        http_proxy::handle_http(&tunnel, stream, src_addr, sniffer.as_deref()).await;
     }
 }

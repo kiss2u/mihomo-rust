@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 mihomo-common = { workspace = true }
+mihomo-trie = { workspace = true }
 mihomo-tunnel = { workspace = true }
 mihomo-dns = { workspace = true }
 tokio = { workspace = true }
