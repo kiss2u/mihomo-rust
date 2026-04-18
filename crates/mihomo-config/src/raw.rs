@@ -35,6 +35,8 @@ pub struct RawConfig {
     /// Named listener array. Each entry defines an explicitly-named proxy
     /// listener instance. Merged with the shorthand port fields at parse time.
     pub listeners: Option<Vec<RawListener>>,
+    pub authentication: Option<Vec<String>>,
+    pub skip_auth_prefixes: Option<Vec<String>>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.

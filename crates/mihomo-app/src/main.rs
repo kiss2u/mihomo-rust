@@ -491,6 +491,7 @@ async fn run(
 
     // Build shared SnifferRuntime from config (once per startup).
     let sniffer_runtime = Arc::new(SnifferRuntime::new(config.sniffer));
+    let auth = config.auth;
 
     // Start listeners
     use mihomo_config::ListenerType;
@@ -500,7 +501,8 @@ async fn run(
         match nl.listener_type {
             ListenerType::Mixed | ListenerType::Http | ListenerType::Socks5 => {
                 let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
-                    .with_sniffer(sniffer_runtime.clone());
+                    .with_sniffer(sniffer_runtime.clone())
+                    .with_auth(auth.clone());
                 tokio::spawn(async move {
                     if let Err(e) = listener.run().await {
                         error!("Listener error: {}", e);

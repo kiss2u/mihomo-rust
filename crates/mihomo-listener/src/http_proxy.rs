@@ -1,5 +1,6 @@
 use crate::sniffer::SnifferRuntime;
-use mihomo_common::{ConnType, Metadata, Network};
+use base64::Engine;
+use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,11 +12,20 @@ pub async fn handle_http(
     mut stream: TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) {
-    if let Err(e) =
-        handle_http_inner(tunnel, &mut stream, src_addr, sniffer, in_name, in_port).await
+    if let Err(e) = handle_http_inner(
+        tunnel,
+        &mut stream,
+        src_addr,
+        sniffer,
+        auth,
+        in_name,
+        in_port,
+    )
+    .await
     {
         debug!("HTTP proxy error from {}: {}", src_addr, e);
     }
@@ -26,6 +36,7 @@ async fn handle_http_inner(
     stream: &mut TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -56,6 +67,40 @@ async fn handle_http_inner(
         }
     }
 
+    // Auth check: verify Proxy-Authorization before dispatching.
+    let needs_auth = auth.map(|a| !a.credentials.is_empty()).unwrap_or(false)
+        && !auth.map(|a| a.should_skip(&src_addr.ip())).unwrap_or(false);
+
+    let in_user: Option<String> = if needs_auth {
+        match parse_proxy_authorization(&request_buf) {
+            None => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+                          Proxy-Authenticate: Basic realm=\"mihomo\"\r\n\
+                          Content-Length: 0\r\n\r\n",
+                    )
+                    .await?;
+                return Err("proxy authentication required".into());
+            }
+            Some((username, password)) => {
+                if !auth.unwrap().credentials.verify(&username, &password) {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+                              Proxy-Authenticate: Basic realm=\"mihomo\"\r\n\
+                              Content-Length: 0\r\n\r\n",
+                        )
+                        .await?;
+                    return Err(format!("HTTP auth failed for user {:?}", username).into());
+                }
+                Some(username)
+            }
+        }
+    } else {
+        None
+    };
+
     // Parse the request line from the buffer
     let request_str = String::from_utf8_lossy(&request_buf);
     let request_line = request_str
@@ -85,6 +130,7 @@ async fn handle_http_inner(
             dst_port: port,
             in_name: in_name.to_string(),
             in_port,
+            in_user: in_user.clone(),
             ..Default::default()
         };
 
@@ -150,6 +196,7 @@ async fn handle_http_inner(
             dst_port: port,
             in_name: in_name.to_string(),
             in_port,
+            in_user,
             ..Default::default()
         };
 
@@ -276,4 +323,29 @@ fn extract_path_from_url(url: &str) -> &str {
         .find('/')
         .map(|i| &without_scheme[i..])
         .unwrap_or("/")
+}
+
+/// Parse `Proxy-Authorization: Basic <base64>` from raw request headers.
+/// Returns `(username, password)` on success.
+fn parse_proxy_authorization(headers: &[u8]) -> Option<(String, String)> {
+    let headers_str = std::str::from_utf8(headers).ok()?;
+    for line in headers_str.lines() {
+        if line.len() < 20 {
+            continue;
+        }
+        if !line[..20].eq_ignore_ascii_case("proxy-authorization:") {
+            continue;
+        }
+        let value = line[20..].trim();
+        let encoded = value
+            .strip_prefix("Basic ")
+            .or_else(|| value.strip_prefix("basic "))?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .ok()?;
+        let decoded_str = String::from_utf8(decoded).ok()?;
+        let (user, pass) = decoded_str.split_once(':')?;
+        return Some((user.to_string(), pass.to_string()));
+    }
+    None
 }

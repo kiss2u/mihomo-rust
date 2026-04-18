@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod dns_parser;
 pub mod proxy_parser;
 pub mod proxy_provider;
@@ -7,6 +8,7 @@ pub mod rule_provider;
 pub mod sub_rules_parser;
 pub mod subscription;
 
+use mihomo_common::AuthConfig;
 use mihomo_common::{Proxy, Rule, SnifferConfig, TunnelMode};
 use mihomo_dns::Resolver;
 use proxy_provider::ProxyProvider;
@@ -27,6 +29,7 @@ pub struct Config {
     pub listeners: ListenerConfig,
     pub api: ApiConfig,
     pub sniffer: SnifferConfig,
+    pub auth: Arc<AuthConfig>,
     pub raw: raw::RawConfig,
 }
 
@@ -698,6 +701,14 @@ async fn build_config(
     // Sniffer config — also handles deprecated `tproxy_sni` alias.
     let sniffer = parse_sniffer_config(&raw)?;
 
+    // Auth config.
+    let auth = auth::parse_auth_config(
+        raw.authentication.as_deref(),
+        raw.skip_auth_prefixes.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let auth = Arc::new(auth);
+
     info!(
         "Config loaded: mode={}, proxies={}, rules={}",
         mode,
@@ -715,6 +726,7 @@ async fn build_config(
         listeners,
         api,
         sniffer,
+        auth,
         raw,
     })
 }

@@ -45,10 +45,9 @@ pub struct Metadata {
     pub in_name: String,
     #[serde(rename = "inboundPort")]
     pub in_port: u16,
-    /// Authenticated username populated by the inbound auth layer (M1.F-3).
-    /// Empty string until F-3 lands; `IN-USER` rule never matches when empty.
-    #[serde(rename = "inboundUser", skip_serializing_if = "String::is_empty")]
-    pub in_user: String,
+    /// Authenticated username; `None` when auth was skipped or not configured.
+    #[serde(rename = "inboundUser", skip_serializing_if = "Option::is_none")]
+    pub in_user: Option<String>,
     #[serde(rename = "specialProxy")]
     pub special_proxy: String,
 }
@@ -73,7 +72,7 @@ impl Default for Metadata {
             sniff_host: String::new(),
             in_name: String::new(),
             in_port: 0,
-            in_user: String::new(),
+            in_user: None,
             special_proxy: String::new(),
         }
     }
@@ -129,7 +128,7 @@ impl Metadata {
             sniff_host: String::new(),
             in_name: String::new(),
             in_port: 0,
-            in_user: String::new(),
+            in_user: None,
             special_proxy: String::new(),
         }
     }

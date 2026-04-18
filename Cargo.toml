@@ -66,6 +66,7 @@ ipnet = "2"
 # Crypto
 sha2 = "0.10"
 hex = "0.4"
+subtle = "2"
 
 # Logging
 tracing = "0.1"

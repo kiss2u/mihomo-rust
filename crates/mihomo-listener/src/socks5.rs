@@ -1,5 +1,5 @@
 use crate::sniffer::SnifferRuntime;
-use mihomo_common::{ConnType, Metadata, Network};
+use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,6 +8,8 @@ use tracing::{debug, info, warn};
 
 const SOCKS5_VERSION: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
+const USER_PASS_AUTH: u8 = 0x02;
+const NO_ACCEPTABLE_METHODS: u8 = 0xFF;
 const CMD_CONNECT: u8 = 0x01;
 #[allow(dead_code)]
 const CMD_UDP_ASSOCIATE: u8 = 0x03;
@@ -21,11 +23,20 @@ pub async fn handle_socks5(
     mut stream: TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) {
-    if let Err(e) =
-        handle_socks5_inner(tunnel, &mut stream, src_addr, sniffer, in_name, in_port).await
+    if let Err(e) = handle_socks5_inner(
+        tunnel,
+        &mut stream,
+        src_addr,
+        sniffer,
+        auth,
+        in_name,
+        in_port,
+    )
+    .await
     {
         debug!("SOCKS5 error from {}: {}", src_addr, e);
     }
@@ -36,6 +47,7 @@ async fn handle_socks5_inner(
     stream: &mut TcpStream,
     src_addr: SocketAddr,
     sniffer: Option<&SnifferRuntime>,
+    auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -49,8 +61,48 @@ async fn handle_socks5_inner(
     let mut methods = vec![0u8; nmethods];
     stream.read_exact(&mut methods).await?;
 
-    // Reply: no auth required
-    stream.write_all(&[SOCKS5_VERSION, NO_AUTH]).await?;
+    let needs_auth = auth.map(|a| !a.credentials.is_empty()).unwrap_or(false)
+        && !auth.map(|a| a.should_skip(&src_addr.ip())).unwrap_or(false);
+
+    let in_user: Option<String> = if needs_auth {
+        let auth = auth.unwrap();
+        if !methods.contains(&USER_PASS_AUTH) {
+            stream
+                .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
+                .await?;
+            return Err("client does not support username/password auth".into());
+        }
+        stream.write_all(&[SOCKS5_VERSION, USER_PASS_AUTH]).await?;
+
+        // RFC 1929 sub-negotiation: [0x01, ulen, user..., plen, pass...]
+        let mut sub_ver = [0u8; 1];
+        stream.read_exact(&mut sub_ver).await?;
+        if sub_ver[0] != 0x01 {
+            return Err("invalid auth sub-negotiation version".into());
+        }
+        let mut ulen = [0u8; 1];
+        stream.read_exact(&mut ulen).await?;
+        let mut username_buf = vec![0u8; ulen[0] as usize];
+        stream.read_exact(&mut username_buf).await?;
+        let mut plen = [0u8; 1];
+        stream.read_exact(&mut plen).await?;
+        let mut password_buf = vec![0u8; plen[0] as usize];
+        stream.read_exact(&mut password_buf).await?;
+
+        let username = String::from_utf8_lossy(&username_buf).to_string();
+        let password = String::from_utf8_lossy(&password_buf).to_string();
+
+        if !auth.credentials.verify(&username, &password) {
+            stream.write_all(&[0x01, 0x01]).await?;
+            return Err(format!("SOCKS5 auth failed for user {:?}", username).into());
+        }
+        stream.write_all(&[0x01, 0x00]).await?;
+        Some(username)
+    } else {
+        // No auth required
+        stream.write_all(&[SOCKS5_VERSION, NO_AUTH]).await?;
+        None
+    };
 
     // 2. Request
     let mut req = [0u8; 4];
@@ -98,6 +150,7 @@ async fn handle_socks5_inner(
         host,
         in_name: in_name.to_string(),
         in_port,
+        in_user,
         ..Default::default()
     };
 

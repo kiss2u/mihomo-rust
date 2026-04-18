@@ -1,8 +1,7 @@
 //! IN-USER rule — matches on the authenticated inbound username (`Metadata.in_user`).
 //!
-//! `Metadata.in_user` is populated by the inbound auth layer (M1.F-3). Until
-//! F-3 lands the field is always empty, so this rule never matches — consistent
-//! with the "no auth configured → IN-USER is always absent" semantic.
+//! `Metadata.in_user` is `None` when no auth is configured or the connection
+//! bypassed auth. This rule never matches in that case.
 //!
 //! upstream: `rules/common/inbound.go`
 
@@ -28,7 +27,7 @@ impl Rule for InUserRule {
     }
 
     fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
-        !metadata.in_user.is_empty() && metadata.in_user == self.username
+        metadata.in_user.as_deref() == Some(self.username.as_str())
     }
 
     fn adapter(&self) -> &str {
@@ -49,9 +48,9 @@ mod tests {
         RuleMatchHelper
     }
 
-    fn meta_with_user(in_user: &str) -> Metadata {
+    fn meta_with_user(in_user: Option<&str>) -> Metadata {
         Metadata {
-            in_user: in_user.to_string(),
+            in_user: in_user.map(str::to_string),
             ..Default::default()
         }
     }
@@ -59,20 +58,20 @@ mod tests {
     #[test]
     fn in_user_matches_when_populated() {
         let r = InUserRule::new("alice", "DIRECT").unwrap();
-        assert!(r.match_metadata(&meta_with_user("alice"), &helper()));
+        assert!(r.match_metadata(&meta_with_user(Some("alice")), &helper()));
     }
 
     #[test]
     fn in_user_no_match_different_user() {
         let r = InUserRule::new("alice", "DIRECT").unwrap();
-        assert!(!r.match_metadata(&meta_with_user("bob"), &helper()));
+        assert!(!r.match_metadata(&meta_with_user(Some("bob")), &helper()));
     }
 
     #[test]
-    fn in_user_empty_never_matches() {
-        // F-3 not yet landed: in_user is always empty → IN-USER never matches.
+    fn in_user_none_never_matches() {
+        // No auth configured: in_user is None → IN-USER never matches.
         // upstream: rules/common/inbound.go (populated only after auth)
         let r = InUserRule::new("alice", "DIRECT").unwrap();
-        assert!(!r.match_metadata(&meta_with_user(""), &helper()));
+        assert!(!r.match_metadata(&meta_with_user(None), &helper()));
     }
 }
