@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use dashmap::DashMap;
 use mihomo_api::ApiServer;
 use mihomo_config::load_config;
+use mihomo_config::proxy_provider::ProxyProvider;
 use mihomo_config::raw::RawConfig;
 use mihomo_dns::DnsServer;
 use mihomo_listener::{MixedListener, TProxyListener};
@@ -401,6 +403,15 @@ async fn run(
     // Keep raw config in shared state for runtime mutations
     let raw_config = Arc::new(RwLock::new(config.raw.clone()));
 
+    // Wrap proxy providers in a DashMap for concurrent access.
+    let proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>> = {
+        let map = DashMap::new();
+        for (name, provider) in config.proxy_providers {
+            map.insert(name, provider);
+        }
+        Arc::new(map)
+    };
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(config.dns.resolver.clone());
     tunnel.set_mode(config.general.mode);
@@ -426,6 +437,7 @@ async fn run(
             config_path.clone(),
             raw_config.clone(),
             log_tx.clone(),
+            proxy_providers.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {

@@ -1,4 +1,5 @@
 use axum::http::{Request, StatusCode};
+use dashmap::DashMap;
 use http_body_util::BodyExt;
 use mihomo_api::routes::{create_router, AppState};
 use mihomo_common::DnsMode;
@@ -52,6 +53,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
         log_tx: test_log_tx(),
+        proxy_providers: Arc::new(DashMap::new()),
     })
 }
 
@@ -82,6 +84,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
         log_tx: test_log_tx(),
+        proxy_providers: Arc::new(DashMap::new()),
     })
 }
 
@@ -1511,6 +1514,7 @@ mod delay_support {
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             log_tx: tokio::sync::broadcast::channel(16).0,
+            proxy_providers: Arc::new(DashMap::new()),
         })
     }
 
@@ -1558,6 +1562,7 @@ mod delay_support {
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             log_tx: tokio::sync::broadcast::channel(16).0,
+            proxy_providers: Arc::new(DashMap::new()),
         })
     }
 }

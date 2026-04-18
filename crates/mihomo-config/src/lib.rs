@@ -1,5 +1,6 @@
 pub mod dns_parser;
 pub mod proxy_parser;
+pub mod proxy_provider;
 pub mod raw;
 pub mod rule_parser;
 pub mod rule_provider;
@@ -8,6 +9,7 @@ pub mod subscription;
 
 use mihomo_common::{Proxy, Rule, TunnelMode};
 use mihomo_dns::Resolver;
+use proxy_provider::ProxyProvider;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ pub struct Config {
     pub general: GeneralConfig,
     pub dns: DnsConfig,
     pub proxies: HashMap<String, Arc<dyn Proxy>>,
+    pub proxy_providers: HashMap<String, Arc<ProxyProvider>>,
     pub rules: Vec<Box<dyn Rule>>,
     pub listeners: ListenerConfig,
     pub api: ApiConfig,
@@ -94,7 +97,7 @@ pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 /// Does not resolve rule-provider cache paths; use
 /// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_with_cache_dir(raw, None, None)
+    rebuild_from_raw_impl(raw, None, None, &HashMap::new())
 }
 
 /// Rebuild proxies/rules and inject `resolver` into the built-in DIRECT
@@ -103,7 +106,7 @@ pub fn rebuild_from_raw_with_resolver(
     raw: &raw::RawConfig,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_with_cache_dir(raw, None, resolver)
+    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new())
 }
 
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
@@ -113,6 +116,15 @@ pub fn rebuild_from_raw_with_cache_dir(
     raw: &raw::RawConfig,
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
+) -> Result<RebuildResult, anyhow::Error> {
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new())
+}
+
+fn rebuild_from_raw_impl(
+    raw: &raw::RawConfig,
+    cache_dir: Option<&Path>,
+    resolver: Option<Arc<Resolver>>,
+    providers: &HashMap<String, Arc<ProxyProvider>>,
 ) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
@@ -159,7 +171,7 @@ pub fn rebuild_from_raw_with_cache_dir(
         max_passes -= 1;
         let mut still_remaining = Vec::new();
         for raw_group in &remaining {
-            match proxy_parser::parse_proxy_group(raw_group, &proxies) {
+            match proxy_parser::parse_proxy_group(raw_group, &proxies, providers) {
                 Ok(group) => {
                     let name = group.name().to_string();
                     proxies.insert(name, group);
@@ -175,7 +187,7 @@ pub fn rebuild_from_raw_with_cache_dir(
             // Match upstream mihomo: warn-and-skip the missing members and
             // build the group with whatever resolved.
             for raw_group in &still_remaining {
-                match proxy_parser::parse_proxy_group_lenient(raw_group, &proxies) {
+                match proxy_parser::parse_proxy_group_lenient(raw_group, &proxies, providers) {
                     Ok(group) => {
                         let name = group.name().to_string();
                         proxies.insert(name, group);
@@ -401,10 +413,25 @@ async fn build_config(
     // DNS
     let dns_config = dns_parser::parse_dns(&raw).await?;
 
+    // Load proxy providers (async: may HTTP-fetch provider files).
+    let proxy_providers = if let Some(raw_pp) = raw.proxy_providers.as_ref() {
+        if !raw_pp.is_empty() {
+            proxy_provider::load_proxy_providers(raw_pp, cache_dir).await
+        } else {
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
+
     // Proxies and rules via rebuild — pass the resolver so DIRECT can avoid
     // the OS resolver (and the resulting DNS-loop when mihomo is system DNS).
-    let (proxies, rules) =
-        rebuild_from_raw_with_cache_dir(&raw, cache_dir, Some(dns_config.resolver.clone()))?;
+    let (proxies, rules) = rebuild_from_raw_impl(
+        &raw,
+        cache_dir,
+        Some(dns_config.resolver.clone()),
+        &proxy_providers,
+    )?;
 
     // Listener config
     let bind_addr = if general.allow_lan {
@@ -442,6 +469,7 @@ async fn build_config(
         general,
         dns: dns_config,
         proxies,
+        proxy_providers,
         rules,
         listeners,
         api,

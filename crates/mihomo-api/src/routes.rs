@@ -7,8 +7,12 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use dashmap::DashMap;
 use mihomo_common::TunnelMode;
-use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
+use mihomo_config::{
+    proxy_provider::ProxyProvider,
+    raw::{RawConfig, RawProxyGroup, RawSubscription},
+};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -31,6 +35,8 @@ pub struct AppState {
     pub raw_config: Arc<RwLock<RawConfig>>,
     /// Fan-out channel for log events. Each WS client subscribes a Receiver.
     pub log_tx: broadcast::Sender<LogMessage>,
+    /// Live proxy-provider registry — refreshed by background task and PUT endpoint.
+    pub proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
 }
 
 impl AppState {
@@ -179,6 +185,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/proxy-groups/{name}/select",
             put(select_proxy_in_group),
+        )
+        // Proxy providers
+        .route("/providers/proxies", get(get_providers))
+        .route(
+            "/providers/proxies/{name}",
+            get(get_provider).put(refresh_provider),
+        )
+        .route(
+            "/providers/proxies/{name}/healthcheck",
+            get(provider_healthcheck),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -1376,4 +1392,103 @@ fn read_os_memory_limit_linux() -> u64 {
         }
     }
     0
+}
+
+// ── Proxy providers ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderInfo {
+    name: String,
+    #[serde(rename = "type")]
+    provider_type: String,
+    vehicle_type: String,
+    proxies: Vec<ProxyInfo>,
+}
+
+fn provider_to_info(name: &str, provider: &ProxyProvider) -> ProviderInfo {
+    let proxies = provider
+        .proxies()
+        .iter()
+        .map(ProxyInfo::from_proxy)
+        .collect();
+    ProviderInfo {
+        name: name.to_string(),
+        provider_type: "Proxy".to_string(),
+        vehicle_type: provider.vehicle_type.to_string(),
+        proxies,
+    }
+}
+
+async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for entry in state.proxy_providers.iter() {
+        let info = provider_to_info(entry.key(), entry.value());
+        map.insert(
+            entry.key().clone(),
+            serde_json::to_value(info).unwrap_or_default(),
+        );
+    }
+    Json(serde_json::json!({ "providers": map }))
+}
+
+async fn get_provider(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    match state.proxy_providers.get(&name) {
+        Some(entry) => Json(provider_to_info(&name, entry.value())).into_response(),
+        None => msg_err(StatusCode::NOT_FOUND, "resource not found"),
+    }
+}
+
+async fn refresh_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Response {
+    let provider = match state.proxy_providers.get(&name) {
+        Some(entry) => entry.value().clone(),
+        None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
+    };
+    provider.refresh().await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Trigger a health check for all proxies in the named provider.
+/// Accepts the same `url` and `timeout` query params as `GET /proxies/:name/delay`.
+async fn provider_healthcheck(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(params): Query<DelayParams>,
+) -> Response {
+    let timeout = match parse_delay_params(&params) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let url = params.url.as_deref().unwrap_or("").to_string();
+    let expected = params.expected.clone();
+
+    let provider = match state.proxy_providers.get(&name) {
+        Some(entry) => entry.value().clone(),
+        None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
+    };
+
+    let members = provider.proxies();
+    let url_shared = Arc::new(url);
+    let expected_shared = Arc::new(expected);
+    let mut set: JoinSet<(String, u16)> = JoinSet::new();
+    for proxy in members {
+        let url = url_shared.clone();
+        let expected = expected_shared.clone();
+        set.spawn(async move {
+            let delay = probe_and_record(&proxy, &url, expected.as_deref(), timeout)
+                .await
+                .unwrap_or(0);
+            (proxy.name().to_string(), delay)
+        });
+    }
+
+    let mut results = serde_json::Map::new();
+    while let Some(Ok((pname, delay))) = set.join_next().await {
+        results.insert(pname, serde_json::Value::Number(delay.into()));
+    }
+
+    Json(serde_json::Value::Object(results)).into_response()
 }
