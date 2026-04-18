@@ -9,6 +9,7 @@ use axum::{
 use mihomo_common::TunnelMode;
 use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use mihomo_config::rule_provider::RuleProvider;
+use mihomo_config::NamedListener;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ pub struct AppState {
     pub config_path: String,
     pub raw_config: Arc<RwLock<RawConfig>>,
     pub rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+    /// Snapshot of active named listeners (read-only, startup-time only in M1).
+    pub listeners: Vec<NamedListener>,
 }
 
 impl AppState {
@@ -128,6 +131,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/providers/rules/{name}",
             get(get_rule_provider).put(refresh_rule_provider),
         )
+        // Listeners (read-only list)
+        .route("/listeners", get(get_listeners))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
@@ -1044,4 +1049,22 @@ async fn refresh_rule_provider(
             StatusCode::SERVICE_UNAVAILABLE
         }
     }
+}
+
+// ── Listeners ─────────────────────────────────────────────────────────
+
+async fn get_listeners(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let items: Vec<serde_json::Value> = state
+        .listeners
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "name": l.name,
+                "type": l.listener_type.to_string(),
+                "port": l.port,
+                "listen": l.listen,
+            })
+        })
+        .collect();
+    Json(serde_json::json!(items))
 }

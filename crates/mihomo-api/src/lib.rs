@@ -3,6 +3,7 @@ pub mod ui;
 
 use mihomo_config::raw::RawConfig;
 use mihomo_config::rule_provider::RuleProvider;
+use mihomo_config::NamedListener;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -17,9 +18,11 @@ pub struct ApiServer {
     config_path: String,
     raw_config: Arc<RwLock<RawConfig>>,
     rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+    listeners: Vec<NamedListener>,
 }
 
 impl ApiServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tunnel: Tunnel,
         listen_addr: SocketAddr,
@@ -27,6 +30,7 @@ impl ApiServer {
         config_path: String,
         raw_config: Arc<RwLock<RawConfig>>,
         rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
+        listeners: Vec<NamedListener>,
     ) -> Self {
         Self {
             tunnel,
@@ -35,6 +39,7 @@ impl ApiServer {
             config_path,
             raw_config,
             rule_providers,
+            listeners,
         }
     }
 
@@ -45,6 +50,7 @@ impl ApiServer {
             config_path: self.config_path.clone(),
             raw_config: self.raw_config.clone(),
             rule_providers: self.rule_providers.clone(),
+            listeners: self.listeners.clone(),
         });
 
         let app = routes::create_router(state);

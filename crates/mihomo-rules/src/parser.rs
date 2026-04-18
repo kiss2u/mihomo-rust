@@ -12,7 +12,9 @@ use crate::final_rule::FinalRule;
 use crate::geoip::GeoIpRule;
 use crate::geosite::GeositeDB;
 use crate::geosite_rule::GeoSiteRule;
+use crate::in_name::InNameRule;
 use crate::in_port::InPortRule;
+use crate::in_type::InTypeRule;
 use crate::ip_asn::IpAsnRule;
 use crate::ip_suffix::IpSuffixRule;
 use crate::ipcidr::IpCidrRule;
@@ -173,6 +175,8 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
             )))
         }
         "IN-PORT" => InPortRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
+        "IN-NAME" => InNameRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
+        "IN-TYPE" => InTypeRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "DSCP" => DscpRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "UID" => UidRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "PROCESS-PATH" => {

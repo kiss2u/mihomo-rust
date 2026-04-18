@@ -5,8 +5,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
-pub async fn handle_http(tunnel: &Tunnel, mut stream: TcpStream, src_addr: SocketAddr) {
-    if let Err(e) = handle_http_inner(tunnel, &mut stream, src_addr).await {
+pub async fn handle_http(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    in_name: &str,
+    in_port: u16,
+) {
+    if let Err(e) = handle_http_inner(tunnel, &mut stream, src_addr, in_name, in_port).await {
         debug!("HTTP proxy error from {}: {}", src_addr, e);
     }
 }
@@ -15,6 +21,8 @@ async fn handle_http_inner(
     tunnel: &Tunnel,
     stream: &mut TcpStream,
     src_addr: SocketAddr,
+    in_name: &str,
+    in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Read the HTTP request line and headers byte by byte until we find \r\n\r\n.
     // We avoid BufReader to prevent borrow issues with the stream.
@@ -70,6 +78,8 @@ async fn handle_http_inner(
             src_port: src_addr.port(),
             host: host.clone(),
             dst_port: port,
+            in_name: in_name.to_string(),
+            in_port,
             ..Default::default()
         };
 
@@ -127,6 +137,8 @@ async fn handle_http_inner(
             src_port: src_addr.port(),
             host: host.clone(),
             dst_port: port,
+            in_name: in_name.to_string(),
+            in_port,
             ..Default::default()
         };
 

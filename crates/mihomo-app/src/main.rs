@@ -411,6 +411,7 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
             config_path.clone(),
             raw_config.clone(),
             rule_providers.clone(),
+            config.listeners.named.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {
@@ -458,51 +459,34 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
     }
 
     // Start listeners
-    let bind_addr = &config.listeners.bind_address;
+    use mihomo_config::ListenerType;
 
-    if let Some(port) = config.listeners.mixed_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("Mixed listener error: {}", e);
+    for nl in &config.listeners.named {
+        let addr: SocketAddr = format!("{}:{}", nl.listen, nl.port).parse()?;
+        match nl.listener_type {
+            ListenerType::Mixed | ListenerType::Http | ListenerType::Socks5 => {
+                let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = listener.run().await {
+                        error!("Listener error: {}", e);
+                    }
+                });
             }
-        });
-    }
-
-    if let Some(port) = config.listeners.socks_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("SOCKS listener error: {}", e);
+            ListenerType::TProxy => {
+                let listener = TProxyListener::new(
+                    tunnel.clone(),
+                    addr,
+                    nl.tproxy_sni,
+                    config.listeners.routing_mark,
+                    nl.name.clone(),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = listener.run().await {
+                        error!("TProxy listener error: {}", e);
+                    }
+                });
             }
-        });
-    }
-
-    if let Some(port) = config.listeners.http_port {
-        let addr: SocketAddr = format!("{}:{}", bind_addr, port).parse()?;
-        let listener = MixedListener::new(tunnel.clone(), addr);
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("HTTP listener error: {}", e);
-            }
-        });
-    }
-
-    if let Some(port) = config.listeners.tproxy_port {
-        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-        let listener = TProxyListener::new(
-            tunnel.clone(),
-            addr,
-            config.listeners.tproxy_sni,
-            config.listeners.routing_mark,
-        );
-        tokio::spawn(async move {
-            if let Err(e) = listener.run().await {
-                error!("TProxy listener error: {}", e);
-            }
-        });
+        }
     }
 
     info!("mihomo-rust is running");

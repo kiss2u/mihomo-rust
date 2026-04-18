@@ -8,6 +8,7 @@ pub mod subscription;
 
 use mihomo_common::{Proxy, Rule, TunnelMode};
 use mihomo_dns::Resolver;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,38 @@ pub struct DnsConfig {
     pub listen_addr: Option<SocketAddr>,
 }
 
+/// Listener protocol type — mirrors the `type:` field in the YAML `listeners:` array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenerType {
+    Mixed,
+    Http,
+    Socks5,
+    TProxy,
+}
+
+impl std::fmt::Display for ListenerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListenerType::Mixed => write!(f, "mixed"),
+            ListenerType::Http => write!(f, "http"),
+            ListenerType::Socks5 => write!(f, "socks5"),
+            ListenerType::TProxy => write!(f, "tproxy"),
+        }
+    }
+}
+
+/// A single resolved named-listener entry (either from `listeners:` or auto-named shorthand).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedListener {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub listener_type: ListenerType,
+    pub port: u16,
+    pub listen: String,
+    pub tproxy_sni: bool,
+}
+
 pub struct ListenerConfig {
     pub mixed_port: Option<u16>,
     pub socks_port: Option<u16>,
@@ -46,6 +79,8 @@ pub struct ListenerConfig {
     pub tproxy_port: Option<u16>,
     pub tproxy_sni: bool,
     pub routing_mark: Option<u32>,
+    /// All active listeners (shorthand + named), deduplicated and validated.
+    pub named: Vec<NamedListener>,
 }
 
 pub struct ApiConfig {
@@ -375,6 +410,102 @@ fn mihomo_config_dir() -> PathBuf {
     base.join("mihomo")
 }
 
+/// Parse `type:` string from a `listeners:` entry into `ListenerType`.
+/// Hard errors on unknown types (Class A per ADR-0002).
+fn parse_listener_type(s: &str) -> Result<ListenerType, anyhow::Error> {
+    match s.to_lowercase().as_str() {
+        "mixed" => Ok(ListenerType::Mixed),
+        "http" => Ok(ListenerType::Http),
+        "socks5" => Ok(ListenerType::Socks5),
+        "tproxy" => Ok(ListenerType::TProxy),
+        other => anyhow::bail!(
+            "unknown listener type '{}'; expected mixed, http, socks5, or tproxy",
+            other
+        ),
+    }
+}
+
+/// Build the authoritative list of named listeners from the raw config.
+/// Merges shorthand fields with the `listeners:` array and validates:
+///   - No duplicate ports (Class A per ADR-0002)
+///   - No duplicate names (Class A per ADR-0002)
+fn build_named_listeners(
+    raw: &raw::RawConfig,
+    default_bind: &str,
+    global_tproxy_sni: bool,
+) -> Result<Vec<NamedListener>, anyhow::Error> {
+    let mut result: Vec<NamedListener> = Vec::new();
+    let mut used_ports: HashMap<u16, String> = HashMap::new();
+    let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut add = |name: &str,
+                   ltype: ListenerType,
+                   port: u16,
+                   listen: &str,
+                   tproxy_sni: bool|
+     -> Result<(), anyhow::Error> {
+        if let Some(existing) = used_ports.get(&port) {
+            anyhow::bail!(
+                "port {} already used by listener '{}' (duplicate port, Class A per ADR-0002)",
+                port,
+                existing
+            );
+        }
+        if !used_names.insert(name.to_string()) {
+            anyhow::bail!(
+                "listener name '{}' already defined (duplicate name, Class A per ADR-0002)",
+                name
+            );
+        }
+        used_ports.insert(port, name.to_string());
+        result.push(NamedListener {
+            name: name.to_string(),
+            listener_type: ltype,
+            port,
+            listen: listen.to_string(),
+            tproxy_sni,
+        });
+        Ok(())
+    };
+
+    // Shorthand fields → auto-named listeners
+    if let Some(port) = raw.mixed_port {
+        add("mixed", ListenerType::Mixed, port, default_bind, false)?;
+    }
+    if let Some(port) = raw.socks_port {
+        add("socks", ListenerType::Socks5, port, default_bind, false)?;
+    }
+    if let Some(port) = raw.port {
+        add("http", ListenerType::Http, port, default_bind, false)?;
+    }
+    if let Some(port) = raw.tproxy_port {
+        add(
+            "tproxy",
+            ListenerType::TProxy,
+            port,
+            "127.0.0.1",
+            global_tproxy_sni,
+        )?;
+    }
+
+    // Explicit `listeners:` entries
+    for raw_l in raw.listeners.as_deref().unwrap_or(&[]) {
+        let ltype = parse_listener_type(&raw_l.listener_type)?;
+        let listen = raw_l
+            .listen
+            .as_deref()
+            .unwrap_or(if ltype == ListenerType::TProxy {
+                "127.0.0.1"
+            } else {
+                default_bind
+            });
+        let tproxy_sni = raw_l.tproxy_sni.unwrap_or(global_tproxy_sni);
+        add(&raw_l.name, ltype, raw_l.port, listen, tproxy_sni)?;
+    }
+
+    Ok(result)
+}
+
 async fn build_config(
     raw: raw::RawConfig,
     cache_dir: Option<&Path>,
@@ -421,14 +552,20 @@ async fn build_config(
     } else {
         "127.0.0.1".to_string()
     };
+    let global_tproxy_sni = raw.tproxy_sni.unwrap_or(true);
+
+    // Build the named-listener list, checking for duplicate ports/names.
+    let named_listeners = build_named_listeners(&raw, &bind_addr, global_tproxy_sni)?;
+
     let listeners = ListenerConfig {
         mixed_port: raw.mixed_port,
         socks_port: raw.socks_port,
         http_port: raw.port,
         bind_address: bind_addr,
         tproxy_port: raw.tproxy_port,
-        tproxy_sni: raw.tproxy_sni.unwrap_or(true),
+        tproxy_sni: global_tproxy_sni,
         routing_mark: raw.routing_mark,
+        named: named_listeners,
     };
 
     // API config

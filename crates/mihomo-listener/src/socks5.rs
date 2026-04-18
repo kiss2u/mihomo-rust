@@ -15,8 +15,14 @@ const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const REP_SUCCESS: u8 = 0x00;
 
-pub async fn handle_socks5(tunnel: &Tunnel, mut stream: TcpStream, src_addr: SocketAddr) {
-    if let Err(e) = handle_socks5_inner(tunnel, &mut stream, src_addr).await {
+pub async fn handle_socks5(
+    tunnel: &Tunnel,
+    mut stream: TcpStream,
+    src_addr: SocketAddr,
+    in_name: &str,
+    in_port: u16,
+) {
+    if let Err(e) = handle_socks5_inner(tunnel, &mut stream, src_addr, in_name, in_port).await {
         debug!("SOCKS5 error from {}: {}", src_addr, e);
     }
 }
@@ -25,6 +31,8 @@ async fn handle_socks5_inner(
     tunnel: &Tunnel,
     stream: &mut TcpStream,
     src_addr: SocketAddr,
+    in_name: &str,
+    in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
@@ -83,6 +91,8 @@ async fn handle_socks5_inner(
         dst_ip,
         dst_port,
         host,
+        in_name: in_name.to_string(),
+        in_port,
         ..Default::default()
     };
 

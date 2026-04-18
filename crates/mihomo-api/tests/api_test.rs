@@ -49,6 +49,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
     })
 }
 
@@ -80,6 +81,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
     })
 }
 
@@ -1510,6 +1512,7 @@ mod delay_support {
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
+            listeners: vec![],
         })
     }
 
@@ -1558,6 +1561,7 @@ mod delay_support {
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
+            listeners: vec![],
         })
     }
 }

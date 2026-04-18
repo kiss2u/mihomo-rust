@@ -30,6 +30,9 @@ pub struct RawConfig {
     /// Static host → IP mappings, preferred over upstream DNS lookups.
     /// Values may be a single IP string or a list of IPs.
     pub hosts: Option<HashMap<String, HostsValue>>,
+    /// Named listener array. Each entry defines an explicitly-named proxy
+    /// listener instance. Merged with the shorthand port fields at parse time.
+    pub listeners: Option<Vec<RawListener>>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.
@@ -47,6 +50,18 @@ impl HostsValue {
             HostsValue::Many(v) => v.iter().map(String::as_str).collect(),
         }
     }
+}
+
+/// One entry in the `listeners:` array.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawListener {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub listener_type: String,
+    pub port: u16,
+    pub listen: Option<String>,
+    pub tproxy_sni: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
