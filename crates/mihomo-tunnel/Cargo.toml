@@ -9,6 +9,7 @@ mihomo-common = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-rules = { workspace = true }
 mihomo-proxy = { workspace = true }
+mihomo-trie = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
@@ -22,6 +23,10 @@ serde_json = { workspace = true }
 
 [[bench]]
 name = "udp_bench"
+harness = false
+
+[[bench]]
+name = "rules_bench"
 harness = false
 
 [dev-dependencies]

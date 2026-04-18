@@ -43,7 +43,8 @@ impl std::fmt::Display for ProviderType {
 }
 
 /// A loaded rule-provider. Cheap to share via `Arc`; rule-set reads are
-/// protected by a `RwLock`; refreshes atomically swap the inner rule set.
+/// protected by a short-held `RwLock` (just a pointer swap on write);
+/// refresh parse work runs on a blocking thread (ADR-0008 §7 sub-area 3).
 pub struct RuleProvider {
     pub name: String,
     pub provider_type: ProviderType,
@@ -82,15 +83,22 @@ impl RuleProvider {
     }
 
     /// Fetch a fresh payload from the HTTP URL and swap the rule set atomically.
+    /// Parse work runs on a blocking thread so the tokio executor is not stalled.
     /// Logs `warn!` on failure; keeps the last-good set. No-op for non-HTTP.
     pub async fn refresh(&self, ctx: &ParserContext) -> Result<()> {
         if self.provider_type != ProviderType::Http {
             return Ok(());
         }
         let bytes = fetch_http_async(&self.vehicle).await?;
-        let new_rules: Arc<dyn RuleSet> =
-            Arc::from(parse_bytes_to_ruleset(&bytes, self.behavior, ctx)?);
-        let count = new_rules.len();
+        let behavior = self.behavior;
+        let ctx_clone = ctx.clone();
+        let boxed: Box<dyn RuleSet> = tokio::task::spawn_blocking(move || {
+            parse_bytes_to_ruleset(&bytes, behavior, &ctx_clone)
+        })
+        .await
+        .map_err(|e| anyhow!("parse task panicked: {}", e))??;
+        let count = boxed.len();
+        let new_rules: Arc<dyn RuleSet> = Arc::from(boxed);
         *self.rules.write() = new_rules;
         self.touch();
         info!(provider = %self.name, "rule-provider refreshed: {} rules", count);
