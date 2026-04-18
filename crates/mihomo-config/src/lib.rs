@@ -19,6 +19,7 @@ pub struct Config {
     pub dns: DnsConfig,
     pub proxies: HashMap<String, Arc<dyn Proxy>>,
     pub rules: Vec<Box<dyn Rule>>,
+    pub rule_providers: HashMap<String, Arc<rule_provider::RuleProvider>>,
     pub listeners: ListenerConfig,
     pub api: ApiConfig,
     pub raw: raw::RawConfig,
@@ -199,17 +200,18 @@ pub fn rebuild_from_raw_with_cache_dir(
         Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir, &ctx),
         _ => HashMap::new(),
     };
+    let ruleset_map = rule_provider::snapshot_ruleset_map(&providers);
 
     // Parse sub-rules before top-level rules so that SUB-RULE entries in
     // `rules:` can resolve against already-built blocks.
     let sub_rules = match raw.sub_rules.as_ref() {
-        Some(map) if !map.is_empty() => sub_rules_parser::parse_sub_rules(map, &providers, &ctx)?,
+        Some(map) if !map.is_empty() => sub_rules_parser::parse_sub_rules(map, &ruleset_map, &ctx)?,
         _ => HashMap::new(),
     };
 
     let rules = rule_parser::parse_rules_full(
         raw.rules.as_deref().unwrap_or(&[]),
-        &providers,
+        &ruleset_map,
         &ctx,
         &sub_rules,
     );
@@ -406,6 +408,13 @@ async fn build_config(
     let (proxies, rules) =
         rebuild_from_raw_with_cache_dir(&raw, cache_dir, Some(dns_config.resolver.clone()))?;
 
+    // Rule providers are loaded separately so they can be shared with the API.
+    let ctx = build_parser_context(&raw)?;
+    let rule_providers = match raw.rule_providers.as_ref() {
+        Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir, &ctx),
+        _ => HashMap::new(),
+    };
+
     // Listener config
     let bind_addr = if general.allow_lan {
         general.bind_address.clone()
@@ -443,6 +452,7 @@ async fn build_config(
         dns: dns_config,
         proxies,
         rules,
+        rule_providers,
         listeners,
         api,
         raw,

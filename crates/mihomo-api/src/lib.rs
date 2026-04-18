@@ -2,8 +2,10 @@ pub mod routes;
 pub mod ui;
 
 use mihomo_config::raw::RawConfig;
+use mihomo_config::rule_provider::RuleProvider;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
@@ -14,6 +16,7 @@ pub struct ApiServer {
     secret: Option<String>,
     config_path: String,
     raw_config: Arc<RwLock<RawConfig>>,
+    rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
 }
 
 impl ApiServer {
@@ -23,6 +26,7 @@ impl ApiServer {
         secret: Option<String>,
         config_path: String,
         raw_config: Arc<RwLock<RawConfig>>,
+        rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
     ) -> Self {
         Self {
             tunnel,
@@ -30,6 +34,7 @@ impl ApiServer {
             secret,
             config_path,
             raw_config,
+            rule_providers,
         }
     }
 
@@ -39,6 +44,7 @@ impl ApiServer {
             secret: self.secret.clone(),
             config_path: self.config_path.clone(),
             raw_config: self.raw_config.clone(),
+            rule_providers: self.rule_providers.clone(),
         });
 
         let app = routes::create_router(state);

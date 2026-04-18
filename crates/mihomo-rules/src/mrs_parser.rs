@@ -188,6 +188,26 @@ pub fn write_geosite_mrs(payload: &GeositePayload) -> Result<Vec<u8>, MrsError> 
     Ok(out)
 }
 
+/// Write a complete mrs rule-set file (header + zstd-compressed string-list payload).
+/// `type_tag` should be `TYPE_DOMAIN`, `TYPE_IPCIDR`, or `TYPE_CLASSICAL`.
+/// Used by tests and tooling.
+pub fn write_ruleset_mrs(type_tag: u8, entries: &[&str]) -> Result<Vec<u8>, MrsError> {
+    let mut inner = Vec::new();
+    for e in entries {
+        let b = e.as_bytes();
+        inner.extend_from_slice(&(b.len() as u16).to_be_bytes());
+        inner.extend_from_slice(b);
+    }
+    let compressed = zstd::encode_all(Cursor::new(&inner), 0)?;
+    let mut out = Vec::with_capacity(10 + compressed.len());
+    out.extend_from_slice(&MRS_MAGIC);
+    out.push(MRS_VERSION);
+    out.push(type_tag);
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
 struct ByteReader<'a> {
     data: &'a [u8],
     pos: usize,

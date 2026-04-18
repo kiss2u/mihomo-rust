@@ -84,12 +84,14 @@ pub struct RawProxyGroup {
 #[serde(rename_all = "kebab-case")]
 pub struct RawRuleProvider {
     #[serde(rename = "type")]
-    pub provider_type: String, // "http" | "file"
+    pub provider_type: String, // "http" | "file" | "inline"
     pub behavior: String,       // "domain" | "ipcidr" | "classical"
-    pub format: Option<String>, // "yaml" (default) | "text"
+    pub format: Option<String>, // "yaml" (default) | "text" | "mrs"
     pub url: Option<String>,
     pub path: Option<String>,
     pub interval: Option<u64>,
+    /// Inline payload: list of rule strings (only for type=inline).
+    pub payload: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

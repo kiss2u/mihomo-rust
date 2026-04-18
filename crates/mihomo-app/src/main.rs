@@ -383,6 +383,9 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
     // Keep raw config in shared state for runtime mutations
     let raw_config = Arc::new(RwLock::new(config.raw.clone()));
 
+    // Rule providers in shared state for runtime refresh and API exposure.
+    let rule_providers = Arc::new(RwLock::new(config.rule_providers));
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(config.dns.resolver.clone());
     tunnel.set_mode(config.general.mode);
@@ -407,12 +410,41 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
             config.api.secret.clone(),
             config_path.clone(),
             raw_config.clone(),
+            rule_providers.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {
                 error!("API server error: {}", e);
             }
         });
+    }
+
+    // Spawn background refresh tasks for HTTP rule-providers with interval > 0.
+    {
+        let providers_snap: Vec<_> = rule_providers
+            .read()
+            .values()
+            .filter(|p| {
+                p.interval > 0
+                    && p.provider_type == mihomo_config::rule_provider::ProviderType::Http
+            })
+            .cloned()
+            .collect();
+        for provider in providers_snap {
+            let interval_secs = provider.interval;
+            tokio::spawn(async move {
+                let ctx = mihomo_rules::ParserContext::empty();
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+                ticker.tick().await; // skip the immediate first tick
+                loop {
+                    ticker.tick().await;
+                    if let Err(e) = provider.refresh(&ctx).await {
+                        error!(provider = %provider.name, "background refresh failed: {:#}", e);
+                    }
+                }
+            });
+        }
     }
 
     // Start subscription background refresh task

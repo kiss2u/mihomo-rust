@@ -1,60 +1,139 @@
-//! Rule-provider loader.
+//! Rule-provider loader and runtime refresh (M1.D-5).
 //!
-//! Loads each `rule-providers:` entry at startup into an
-//! `Arc<dyn RuleSet>` that the rule parser can attach to `RULE-SET` rules.
-//!
-//! Design notes:
-//! - HTTP providers are fetched **once** at startup (no background refresh).
-//! - A fetched payload is written to a local cache path so subsequent startups
-//!   can fall back to it when the network is unavailable.
-//! - `file` providers read directly from disk with no network I/O.
-//! - `interval` in the config is accepted for upstream compatibility but
-//!   ignored (see plan and issue madeye/mihomo-rust#5).
+//! Supports `http`, `file`, and `inline` provider types; `yaml`, `text`,
+//! and `mrs` formats (auto-detected by magic bytes for http/file).
+//! HTTP providers with `interval > 0` expose a `refresh()` method that is
+//! called from a background tokio task spawned by `main.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use mihomo_rules::{build_rule_set, ParserContext, RuleSet, RuleSetBehavior, RuleSetFormat};
+use mihomo_rules::{
+    build_rule_set, build_rule_set_from_mrs, is_mrs_bytes, ParserContext, RuleSet, RuleSetBehavior,
+    RuleSetFormat,
+};
+use parking_lot::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 use crate::raw::RawRuleProvider;
 
-/// Load every configured rule-provider, returning a map from provider name
-/// to matcher.
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderType {
+    Http,
+    File,
+    Inline,
+}
+
+impl std::fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http => write!(f, "http"),
+            Self::File => write!(f, "file"),
+            Self::Inline => write!(f, "inline"),
+        }
+    }
+}
+
+/// A loaded rule-provider. Cheap to share via `Arc`; rule-set reads are
+/// protected by a `RwLock`; refreshes atomically swap the inner rule set.
+pub struct RuleProvider {
+    pub name: String,
+    pub provider_type: ProviderType,
+    pub behavior: RuleSetBehavior,
+    /// URL (http) or resolved path (file) for API display. Empty for inline.
+    pub vehicle: String,
+    /// Refresh interval in seconds. `0` = no background refresh.
+    pub interval: u64,
+    /// Unix timestamp (seconds) of last successful load/refresh.
+    updated_at: AtomicU64,
+    rules: RwLock<Arc<dyn RuleSet>>,
+}
+
+impl std::fmt::Debug for RuleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleProvider")
+            .field("name", &self.name)
+            .field("type", &self.provider_type)
+            .field("behavior", &self.behavior)
+            .finish()
+    }
+}
+
+impl RuleProvider {
+    /// Return a snapshot of the current rule set.
+    pub fn snapshot(&self) -> Arc<dyn RuleSet> {
+        self.rules.read().clone()
+    }
+
+    pub fn rule_count(&self) -> usize {
+        self.rules.read().len()
+    }
+
+    pub fn updated_at_secs(&self) -> u64 {
+        self.updated_at.load(Ordering::Relaxed)
+    }
+
+    /// Fetch a fresh payload from the HTTP URL and swap the rule set atomically.
+    /// Logs `warn!` on failure; keeps the last-good set. No-op for non-HTTP.
+    pub async fn refresh(&self, ctx: &ParserContext) -> Result<()> {
+        if self.provider_type != ProviderType::Http {
+            return Ok(());
+        }
+        let bytes = fetch_http_async(&self.vehicle).await?;
+        let new_rules: Arc<dyn RuleSet> =
+            Arc::from(parse_bytes_to_ruleset(&bytes, self.behavior, ctx)?);
+        let count = new_rules.len();
+        *self.rules.write() = new_rules;
+        self.touch();
+        info!(provider = %self.name, "rule-provider refreshed: {} rules", count);
+        Ok(())
+    }
+
+    fn touch(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        self.updated_at.store(now, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loader
+// ---------------------------------------------------------------------------
+
+/// Load every configured rule-provider at startup.
 ///
-/// `cache_dir` is the directory used as the base for resolving relative
-/// provider paths and for storing fetched HTTP payloads. It is typically the
-/// directory containing `config.yaml`. When `None`, relative paths are
-/// resolved against the current working directory and HTTP cache fallback is
-/// disabled.
-///
-/// Providers that fail to load are skipped with a `warn!` log. Any
-/// `RULE-SET,<name>,...` rule that references a missing provider will then
-/// fail to parse and will likewise be logged and skipped — matching the
-/// existing "best-effort, keep running" behaviour of rule parsing.
+/// Returns a map from provider name to `Arc<RuleProvider>`.  Providers that
+/// fail to load are skipped with a `warn!` (best-effort keep-running).
 pub fn load_providers(
     raw_providers: &HashMap<String, RawRuleProvider>,
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
-) -> HashMap<String, Arc<dyn RuleSet>> {
-    let mut out: HashMap<String, Arc<dyn RuleSet>> = HashMap::new();
+) -> HashMap<String, Arc<RuleProvider>> {
+    let mut out = HashMap::new();
     if raw_providers.is_empty() {
         return out;
     }
-
     for (name, cfg) in raw_providers {
         match load_one(name, cfg, cache_dir, ctx) {
-            Ok(set) => {
+            Ok(provider) => {
                 info!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
                     name,
-                    cfg.provider_type,
-                    cfg.behavior,
-                    set.len()
+                    provider.provider_type,
+                    provider.behavior,
+                    provider.rule_count()
                 );
-                out.insert(name.clone(), set);
+                out.insert(name.clone(), Arc::new(provider));
             }
             Err(e) => {
                 warn!("Failed to load rule-provider '{}': {:#}", name, e);
@@ -64,55 +143,207 @@ pub fn load_providers(
     out
 }
 
+/// Build the `HashMap<name, Arc<dyn RuleSet>>` snapshot that the rule parser
+/// needs. Snapshots the current rule set from each provider; safe to call
+/// concurrently with refresh.
+pub fn snapshot_ruleset_map(
+    providers: &HashMap<String, Arc<RuleProvider>>,
+) -> HashMap<String, Arc<dyn RuleSet>> {
+    providers
+        .iter()
+        .map(|(name, p)| (name.clone(), p.snapshot()))
+        .collect()
+}
+
 fn load_one(
     name: &str,
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
-) -> Result<Arc<dyn RuleSet>> {
+) -> Result<RuleProvider> {
     let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{}", e))?;
-
-    let format: RuleSetFormat = match cfg.format.as_deref() {
-        Some(s) => s.parse().map_err(|e: String| anyhow!("{}", e))?,
-        None => RuleSetFormat::Yaml,
-    };
-
-    let raw_text = match cfg.provider_type.as_str() {
-        "file" => {
-            let path = resolve_path(cfg, cache_dir, name, format)
-                .ok_or_else(|| anyhow!("'file' provider requires a 'path'"))?;
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("reading provider file {}", path.display()))?
-        }
-        "http" => {
-            let url = cfg
-                .url
-                .as_deref()
-                .ok_or_else(|| anyhow!("'http' provider requires a 'url'"))?;
-            let cache_path = resolve_path(cfg, cache_dir, name, format);
-            fetch_http_with_cache(url, cache_path.as_deref())?
-        }
-        other => return Err(anyhow!("unknown rule-provider type: {}", other)),
-    };
-
-    let entries = parse_payload(format, &raw_text)?;
-    Ok(Arc::from(build_rule_set(behavior, &entries, ctx)))
+    match cfg.provider_type.as_str() {
+        "inline" => load_inline(name, cfg, behavior, ctx),
+        "file" => load_file(name, cfg, cache_dir, behavior, ctx),
+        "http" => load_http(name, cfg, cache_dir, behavior, ctx),
+        other => Err(anyhow!("unknown rule-provider type: {}", other)),
+    }
 }
 
-/// Resolve the on-disk path used for a provider.
-///
-/// Precedence:
-/// 1. Explicit `path:` from config. Relative paths are resolved against
-///    `cache_dir` when set, otherwise against CWD.
-/// 2. Default `{cache_dir}/rule-providers/{name}.{ext}` when `cache_dir` is
-///    set.
-/// 3. `None` when neither is available (HTTP providers then skip cache).
-fn resolve_path(
+fn load_inline(
+    name: &str,
+    cfg: &RawRuleProvider,
+    behavior: RuleSetBehavior,
+    ctx: &ParserContext,
+) -> Result<RuleProvider> {
+    if cfg.interval.is_some_and(|i| i > 0) {
+        return Err(anyhow!(
+            "rule-provider '{}': inline providers cannot refresh; \
+             remove the `interval:` field (Class A per ADR-0002)",
+            name
+        ));
+    }
+    let payload = cfg
+        .payload
+        .as_deref()
+        .ok_or_else(|| anyhow!("rule-provider '{}': inline type requires `payload:`", name))?;
+    let rules = build_rule_set(behavior, payload, ctx);
+    Ok(make_provider(
+        name,
+        ProviderType::Inline,
+        behavior,
+        String::new(),
+        0,
+        rules,
+    ))
+}
+
+fn load_file(
+    name: &str,
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
+    behavior: RuleSetBehavior,
+    ctx: &ParserContext,
+) -> Result<RuleProvider> {
+    if cfg.interval.is_some_and(|i| i > 0) {
+        warn!(
+            provider = %name,
+            "rule-provider 'interval' is ignored for file providers in M1 \
+             (Class B per ADR-0002)"
+        );
+    }
+    let path = resolve_path(cfg, cache_dir, name)
+        .ok_or_else(|| anyhow!("file provider '{}' requires a 'path'", name))?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("reading provider file {}", path.display()))?;
+    let explicit_format = parse_explicit_format(cfg)?;
+    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
+    let vehicle = path.display().to_string();
+    Ok(make_provider(
+        name,
+        ProviderType::File,
+        behavior,
+        vehicle,
+        0,
+        rules,
+    ))
+}
+
+fn load_http(
     name: &str,
-    format: RuleSetFormat,
-) -> Option<PathBuf> {
+    cfg: &RawRuleProvider,
+    cache_dir: Option<&Path>,
+    behavior: RuleSetBehavior,
+    ctx: &ParserContext,
+) -> Result<RuleProvider> {
+    let url = cfg
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow!("http provider '{}' requires a 'url'", name))?;
+    let cache_path = resolve_path(cfg, cache_dir, name);
+    let bytes = fetch_http_blocking_with_cache(url, cache_path.as_deref())?;
+    let explicit_format = parse_explicit_format(cfg)?;
+    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
+    let interval = cfg.interval.unwrap_or(0);
+    Ok(make_provider(
+        name,
+        ProviderType::Http,
+        behavior,
+        url.to_string(),
+        interval,
+        rules,
+    ))
+}
+
+fn make_provider(
+    name: &str,
+    provider_type: ProviderType,
+    behavior: RuleSetBehavior,
+    vehicle: String,
+    interval: u64,
+    rules: Box<dyn RuleSet>,
+) -> RuleProvider {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let rules_arc: Arc<dyn RuleSet> = Arc::from(rules);
+    RuleProvider {
+        name: name.to_string(),
+        provider_type,
+        behavior,
+        vehicle,
+        interval,
+        updated_at: AtomicU64::new(now),
+        rules: RwLock::new(rules_arc),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Format detection + parsing
+// ---------------------------------------------------------------------------
+
+fn parse_explicit_format(cfg: &RawRuleProvider) -> Result<Option<RuleSetFormat>> {
+    cfg.format
+        .as_deref()
+        .map(|s| s.parse::<RuleSetFormat>().map_err(|e| anyhow!("{}", e)))
+        .transpose()
+}
+
+fn parse_bytes_to_ruleset(
+    bytes: &[u8],
+    behavior: RuleSetBehavior,
+    ctx: &ParserContext,
+) -> Result<Box<dyn RuleSet>> {
+    parse_bytes_to_ruleset_with_format(bytes, behavior, None, ctx)
+}
+
+fn parse_bytes_to_ruleset_with_format(
+    bytes: &[u8],
+    behavior: RuleSetBehavior,
+    explicit_format: Option<RuleSetFormat>,
+    ctx: &ParserContext,
+) -> Result<Box<dyn RuleSet>> {
+    let use_mrs = explicit_format == Some(RuleSetFormat::Mrs) || is_mrs_bytes(bytes);
+    if use_mrs {
+        return build_rule_set_from_mrs(bytes, ctx).map_err(|e| anyhow!("mrs parse error: {}", e));
+    }
+    let text = std::str::from_utf8(bytes).context("payload is not valid UTF-8")?;
+    let entries = match explicit_format.unwrap_or(RuleSetFormat::Yaml) {
+        RuleSetFormat::Yaml => parse_yaml_payload(text)?,
+        RuleSetFormat::Text => parse_text_payload(text),
+        RuleSetFormat::Mrs => unreachable!("handled above"),
+    };
+    Ok(build_rule_set(behavior, &entries, ctx))
+}
+
+fn parse_yaml_payload(raw: &str) -> Result<Vec<String>> {
+    let root: serde_yaml::Value = serde_yaml::from_str(raw).context("rule-set yaml parse error")?;
+    let payload = root
+        .get("payload")
+        .ok_or_else(|| anyhow!("rule-set yaml missing 'payload' key"))?
+        .as_sequence()
+        .ok_or_else(|| anyhow!("rule-set 'payload' is not a sequence"))?;
+    Ok(payload
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+fn parse_text_payload(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Path resolution
+// ---------------------------------------------------------------------------
+
+fn resolve_path(cfg: &RawRuleProvider, cache_dir: Option<&Path>, name: &str) -> Option<PathBuf> {
     if let Some(p) = cfg.path.as_deref() {
         let path = PathBuf::from(p);
         if path.is_absolute() {
@@ -124,39 +355,20 @@ fn resolve_path(
         });
     }
     let dir = cache_dir?;
-    let ext = match format {
-        RuleSetFormat::Yaml => "yaml",
-        RuleSetFormat::Text => "txt",
-    };
-    Some(dir.join("rule-providers").join(format!("{}.{}", name, ext)))
+    Some(dir.join("rule-providers").join(format!("{}.yaml", name)))
 }
 
-/// Fetch the URL and write to `cache_path` on success; fall back to
-/// `cache_path` on fetch failure.
-fn fetch_http_with_cache(url: &str, cache_path: Option<&Path>) -> Result<String> {
+// ---------------------------------------------------------------------------
+// HTTP fetch
+// ---------------------------------------------------------------------------
+
+fn fetch_http_blocking_with_cache(url: &str, cache_path: Option<&Path>) -> Result<Vec<u8>> {
     match fetch_http_blocking(url) {
-        Ok(body) => {
+        Ok(bytes) => {
             if let Some(path) = cache_path {
-                if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        warn!(
-                            "rule-provider cache: failed to create {}: {}",
-                            parent.display(),
-                            e
-                        );
-                    }
-                }
-                if let Err(e) = std::fs::write(path, &body) {
-                    warn!(
-                        "rule-provider cache: failed to write {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    info!("rule-provider cache updated: {}", path.display());
-                }
+                write_cache(path, &bytes);
             }
-            Ok(body)
+            Ok(bytes)
         }
         Err(fetch_err) => {
             if let Some(path) = cache_path {
@@ -166,7 +378,7 @@ fn fetch_http_with_cache(url: &str, cache_path: Option<&Path>) -> Result<String>
                         fetch_err,
                         path.display()
                     );
-                    return std::fs::read_to_string(path)
+                    return std::fs::read(path)
                         .with_context(|| format!("reading cached provider {}", path.display()));
                 }
             }
@@ -175,91 +387,75 @@ fn fetch_http_with_cache(url: &str, cache_path: Option<&Path>) -> Result<String>
     }
 }
 
-/// Synchronous reqwest call, implemented by standing up a short-lived
-/// current-thread tokio runtime. `load_config` is invoked from `main` before
-/// the main runtime exists, so we cannot rely on an ambient executor here.
-fn fetch_http_blocking(url: &str) -> Result<String> {
+fn fetch_http_blocking(url: &str) -> Result<Vec<u8>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("building temporary tokio runtime for rule-provider fetch")?;
-    rt.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("clash-verge/1.0")
-            .build()?;
-        let resp = client.get(url).send().await?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            return Err(anyhow!(
-                "HTTP {}: {}",
-                status,
-                text.chars().take(200).collect::<String>()
-            ));
-        }
-        Ok(text)
-    })
+    rt.block_on(fetch_http_async(url))
 }
 
-/// Extract the list of raw entries from a provider payload.
-///
-/// `yaml` files must have a top-level `payload:` sequence of strings (mihomo
-/// convention). `text` files are one entry per line; `#` comments and blank
-/// lines are ignored.
-fn parse_payload(format: RuleSetFormat, raw: &str) -> Result<Vec<String>> {
-    match format {
-        RuleSetFormat::Yaml => {
-            let root: serde_yaml::Value =
-                serde_yaml::from_str(raw).context("rule-set yaml parse error")?;
-            let payload = root
-                .get("payload")
-                .ok_or_else(|| anyhow!("rule-set yaml missing 'payload' key"))?
-                .as_sequence()
-                .ok_or_else(|| anyhow!("rule-set 'payload' is not a sequence"))?;
-            Ok(payload
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                .filter(|s| !s.is_empty())
-                .collect())
+pub(crate) async fn fetch_http_async(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("clash-verge/1.0")
+        .build()?;
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let bytes = resp.bytes().await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "HTTP {}: {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn write_cache(path: &Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(
+                "rule-provider cache: failed to create {}: {}",
+                parent.display(),
+                e
+            );
+            return;
         }
-        RuleSetFormat::Text => Ok(raw
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|l| l.to_string())
-            .collect()),
+    }
+    if let Err(e) = std::fs::write(path, bytes) {
+        warn!(
+            "rule-provider cache: failed to write {}: {}",
+            path.display(),
+            e
+        );
+    } else {
+        info!("rule-provider cache updated: {}", path.display());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mihomo_rules::mrs_parser::{write_ruleset_mrs, TYPE_DOMAIN};
 
-    #[test]
-    fn yaml_payload_parses() {
-        let raw = "payload:\n  - '+.foo.com'\n  - bar.com\n";
-        assert_eq!(
-            parse_payload(RuleSetFormat::Yaml, raw).unwrap(),
-            vec!["+.foo.com", "bar.com"]
-        );
+    fn ctx() -> ParserContext {
+        ParserContext::empty()
     }
 
     #[test]
-    fn text_payload_strips_comments_and_blanks() {
-        let raw = "# header\n\n10.0.0.0/8\n192.168.0.0/16\n";
-        assert_eq!(
-            parse_payload(RuleSetFormat::Text, raw).unwrap(),
-            vec!["10.0.0.0/8", "192.168.0.0/16"]
-        );
-    }
-
-    #[test]
-    fn file_provider_loads() {
+    fn yaml_file_provider_loads() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("list.yaml");
         std::fs::write(&file_path, "payload:\n  - '+.example.com'\n  - foo.com\n").unwrap();
-
         let mut providers = HashMap::new();
         providers.insert(
             "test".to_string(),
@@ -270,15 +466,103 @@ mod tests {
                 url: None,
                 path: Some(file_path.to_string_lossy().to_string()),
                 interval: None,
+                payload: None,
             },
         );
-
-        let ctx = ParserContext::empty();
-        let out = load_providers(&providers, Some(dir.path()), &ctx);
+        let out = load_providers(&providers, Some(dir.path()), &ctx());
         assert_eq!(out.len(), 1);
-        let set = out.get("test").unwrap();
-        assert_eq!(set.behavior(), RuleSetBehavior::Domain);
-        assert_eq!(set.len(), 2);
+        let p = out.get("test").unwrap();
+        assert_eq!(p.behavior, RuleSetBehavior::Domain);
+        assert_eq!(p.rule_count(), 2);
+    }
+
+    #[test]
+    fn inline_provider_loads_payload() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-rules".to_string(),
+            RawRuleProvider {
+                provider_type: "inline".to_string(),
+                behavior: "domain".to_string(),
+                format: None,
+                url: None,
+                path: None,
+                interval: None,
+                payload: Some(vec!["example.com".to_string(), "+.foo.com".to_string()]),
+            },
+        );
+        let out = load_providers(&providers, None, &ctx());
+        assert_eq!(out.len(), 1);
+        let p = out.get("my-rules").unwrap();
+        assert_eq!(p.provider_type, ProviderType::Inline);
+        assert_eq!(p.rule_count(), 2);
+    }
+
+    #[test]
+    fn inline_with_interval_hard_errors() {
+        let cfg = RawRuleProvider {
+            provider_type: "inline".to_string(),
+            behavior: "domain".to_string(),
+            format: None,
+            url: None,
+            path: None,
+            interval: Some(3600),
+            payload: Some(vec!["example.com".to_string()]),
+        };
+        let err = load_inline("p", &cfg, RuleSetBehavior::Domain, &ctx())
+            .expect_err("inline + interval must hard-error");
+        assert!(
+            err.to_string().contains("inline providers cannot refresh"),
+            "unexpected: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn mrs_format_auto_detected_by_magic_bytes() {
+        let bytes = write_ruleset_mrs(TYPE_DOMAIN, &["example.com", "+.foo.com"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("rules.mrs");
+        std::fs::write(&file_path, &bytes).unwrap();
+        let mut providers = HashMap::new();
+        providers.insert(
+            "mrs-test".to_string(),
+            RawRuleProvider {
+                provider_type: "file".to_string(),
+                behavior: "domain".to_string(),
+                format: None,
+                url: None,
+                path: Some(file_path.to_string_lossy().to_string()),
+                interval: None,
+                payload: None,
+            },
+        );
+        let out = load_providers(&providers, None, &ctx());
+        let p = out.get("mrs-test").expect("provider should load");
+        assert_eq!(p.rule_count(), 2);
+    }
+
+    #[test]
+    fn mrs_explicit_format_override() {
+        let bytes = write_ruleset_mrs(TYPE_DOMAIN, &["example.com"]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("rules.bin");
+        std::fs::write(&file_path, &bytes).unwrap();
+        let mut providers = HashMap::new();
+        providers.insert(
+            "x".to_string(),
+            RawRuleProvider {
+                provider_type: "file".to_string(),
+                behavior: "domain".to_string(),
+                format: Some("mrs".to_string()),
+                url: None,
+                path: Some(file_path.to_string_lossy().to_string()),
+                interval: None,
+                payload: None,
+            },
+        );
+        let out = load_providers(&providers, None, &ctx());
+        assert_eq!(out.get("x").unwrap().rule_count(), 1);
     }
 
     #[test]
@@ -291,12 +575,68 @@ mod tests {
                 behavior: "domain".to_string(),
                 format: None,
                 url: None,
-                path: None, // missing -> error
+                path: None,
                 interval: None,
+                payload: None,
             },
         );
-        let ctx = ParserContext::empty();
-        let out = load_providers(&providers, None, &ctx);
+        let out = load_providers(&providers, None, &ctx());
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn file_provider_interval_warns_but_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("list.yaml");
+        std::fs::write(&file_path, "payload:\n  - 'example.com'\n").unwrap();
+        let mut providers = HashMap::new();
+        providers.insert(
+            "warn-test".to_string(),
+            RawRuleProvider {
+                provider_type: "file".to_string(),
+                behavior: "domain".to_string(),
+                format: Some("yaml".to_string()),
+                url: None,
+                path: Some(file_path.to_string_lossy().to_string()),
+                interval: Some(3600),
+                payload: None,
+            },
+        );
+        let out = load_providers(&providers, None, &ctx());
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_ruleset_map_returns_all_providers() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "p1".to_string(),
+            RawRuleProvider {
+                provider_type: "inline".to_string(),
+                behavior: "domain".to_string(),
+                format: None,
+                url: None,
+                path: None,
+                interval: None,
+                payload: Some(vec!["example.com".to_string()]),
+            },
+        );
+        providers.insert(
+            "p2".to_string(),
+            RawRuleProvider {
+                provider_type: "inline".to_string(),
+                behavior: "ipcidr".to_string(),
+                format: None,
+                url: None,
+                path: None,
+                interval: None,
+                payload: Some(vec!["10.0.0.0/8".to_string()]),
+            },
+        );
+        let out = load_providers(&providers, None, &ctx());
+        let ruleset_map = snapshot_ruleset_map(&out);
+        assert_eq!(ruleset_map.len(), 2);
+        assert!(ruleset_map.contains_key("p1"));
+        assert!(ruleset_map.contains_key("p2"));
     }
 }

@@ -8,10 +8,11 @@ use axum::{
 };
 use mihomo_common::TunnelMode;
 use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
+use mihomo_config::rule_provider::RuleProvider;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -26,6 +27,7 @@ pub struct AppState {
     pub secret: Option<String>,
     pub config_path: String,
     pub raw_config: Arc<RwLock<RawConfig>>,
+    pub rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
 }
 
 impl AppState {
@@ -119,6 +121,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/proxy-groups/{name}/select",
             put(select_proxy_in_group),
+        )
+        // Rule providers
+        .route("/providers/rules", get(get_rule_providers))
+        .route(
+            "/providers/rules/{name}",
+            get(get_rule_provider).put(refresh_rule_provider),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -961,4 +969,79 @@ async fn get_group_delay(
         return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
     }
     Json(result).into_response()
+}
+
+// ── Rule Providers ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct RuleProviderInfo {
+    name: String,
+    #[serde(rename = "type")]
+    provider_type: String,
+    behavior: String,
+    #[serde(rename = "ruleCount")]
+    rule_count: usize,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+    #[serde(rename = "vehicleType")]
+    vehicle_type: String,
+}
+
+impl RuleProviderInfo {
+    fn from_provider(p: &Arc<RuleProvider>) -> Self {
+        Self {
+            name: p.name.clone(),
+            provider_type: p.provider_type.to_string(),
+            behavior: p.behavior.to_string(),
+            rule_count: p.rule_count(),
+            updated_at: p.updated_at_secs(),
+            vehicle_type: p.vehicle.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RuleProvidersResponse {
+    providers: HashMap<String, RuleProviderInfo>,
+}
+
+async fn get_rule_providers(State(state): State<Arc<AppState>>) -> Json<RuleProvidersResponse> {
+    let providers = state.rule_providers.read();
+    let map: HashMap<String, RuleProviderInfo> = providers
+        .iter()
+        .map(|(name, p): (&String, &Arc<RuleProvider>)| {
+            (name.clone(), RuleProviderInfo::from_provider(p))
+        })
+        .collect();
+    Json(RuleProvidersResponse { providers: map })
+}
+
+async fn get_rule_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<RuleProviderInfo>, StatusCode> {
+    let providers = state.rule_providers.read();
+    let p = providers.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(RuleProviderInfo::from_provider(p)))
+}
+
+async fn refresh_rule_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> StatusCode {
+    let provider = {
+        let providers = state.rule_providers.read();
+        providers.get(&name).cloned()
+    };
+    let Some(p) = provider else {
+        return StatusCode::NOT_FOUND;
+    };
+    let ctx = mihomo_rules::ParserContext::empty();
+    match p.refresh(&ctx).await {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            tracing::warn!(provider = %name, "rule-provider refresh failed: {:#}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
 }

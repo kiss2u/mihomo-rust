@@ -7,6 +7,7 @@ use mihomo_dns::Resolver;
 use mihomo_trie::DomainTrie;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -46,6 +47,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         secret: None,
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
     })
 }
 
@@ -75,6 +77,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         secret: Some(secret.to_string()),
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
     })
 }
 
@@ -1503,6 +1506,7 @@ mod delay_support {
             secret: None,
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
+            rule_providers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -1549,6 +1553,7 @@ mod delay_support {
             secret: Some(secret.to_string()),
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
+            rule_providers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }

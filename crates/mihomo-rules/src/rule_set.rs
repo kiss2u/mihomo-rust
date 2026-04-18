@@ -53,6 +53,7 @@ impl fmt::Display for RuleSetBehavior {
 pub enum RuleSetFormat {
     Yaml,
     Text,
+    Mrs,
 }
 
 impl FromStr for RuleSetFormat {
@@ -61,6 +62,7 @@ impl FromStr for RuleSetFormat {
         match s.to_ascii_lowercase().as_str() {
             "yaml" => Ok(Self::Yaml),
             "text" => Ok(Self::Text),
+            "mrs" => Ok(Self::Mrs),
             other => Err(format!("unsupported rule-set format: {}", other)),
         }
     }
@@ -90,6 +92,98 @@ pub fn build_rule_set(
         RuleSetBehavior::IpCidr => Box::new(IpCidrRuleSet::from_entries(entries)),
         RuleSetBehavior::Classical => Box::new(ClassicalRuleSet::from_entries(entries, ctx)),
     }
+}
+
+/// Return `true` if `bytes` starts with the MRS magic `"MRS!"`.
+pub fn is_mrs_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes[..4] == crate::mrs_parser::MRS_MAGIC
+}
+
+/// Parse an MRS binary payload and return the appropriate `RuleSet`.
+/// The behavior is determined by the type tag in the header.
+pub fn build_rule_set_from_mrs(
+    bytes: &[u8],
+    ctx: &ParserContext,
+) -> Result<Box<dyn RuleSet>, String> {
+    use crate::mrs_parser::{
+        decompress_payload, parse_header, TYPE_CLASSICAL, TYPE_DOMAIN, TYPE_IPCIDR,
+    };
+    let (hdr, compressed) = parse_header(bytes).map_err(|e| e.to_string())?;
+    let payload = decompress_payload(compressed).map_err(|e| e.to_string())?;
+    match hdr.type_tag {
+        TYPE_DOMAIN => {
+            let entries = parse_string_list_payload(&payload).map_err(|e| e.to_string())?;
+            Ok(Box::new(DomainRuleSet::from_entries(&entries)))
+        }
+        TYPE_IPCIDR => {
+            let entries = parse_ipcidr_payload(&payload).map_err(|e| e.to_string())?;
+            Ok(Box::new(IpCidrRuleSet::from_entries(&entries)))
+        }
+        TYPE_CLASSICAL => {
+            let entries = parse_string_list_payload(&payload).map_err(|e| e.to_string())?;
+            Ok(Box::new(ClassicalRuleSet::from_entries(&entries, ctx)))
+        }
+        other => Err(format!("mrs: unsupported type tag {}", other)),
+    }
+}
+
+fn parse_string_list_payload(decompressed: &[u8]) -> Result<Vec<String>, String> {
+    let mut pos = 0;
+    let mut entries = Vec::new();
+    while pos < decompressed.len() {
+        if pos + 2 > decompressed.len() {
+            return Err("mrs: truncated string length".to_string());
+        }
+        let len = u16::from_be_bytes([decompressed[pos], decompressed[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len > decompressed.len() {
+            return Err(format!("mrs: truncated string entry at offset {}", pos));
+        }
+        let s = std::str::from_utf8(&decompressed[pos..pos + len])
+            .map_err(|e| format!("mrs: invalid UTF-8: {}", e))?;
+        entries.push(s.to_string());
+        pos += len;
+    }
+    Ok(entries)
+}
+
+fn parse_ipcidr_payload(decompressed: &[u8]) -> Result<Vec<String>, String> {
+    let mut pos = 0;
+    let mut entries = Vec::new();
+    while pos < decompressed.len() {
+        if pos + 1 > decompressed.len() {
+            return Err("mrs: truncated ip family".to_string());
+        }
+        let family = decompressed[pos];
+        pos += 1;
+        let addr_len = match family {
+            4 => 4usize,
+            16 => 16usize,
+            other => return Err(format!("mrs: unknown ip family {}", other)),
+        };
+        if pos + addr_len + 1 > decompressed.len() {
+            return Err("mrs: truncated ip address".to_string());
+        }
+        let addr_bytes = &decompressed[pos..pos + addr_len];
+        pos += addr_len;
+        let prefix_len = decompressed[pos];
+        pos += 1;
+        let cidr = if family == 4 {
+            let arr: [u8; 4] = addr_bytes
+                .try_into()
+                .map_err(|_| "mrs: bad ipv4".to_string())?;
+            let addr = std::net::Ipv4Addr::from(arr);
+            format!("{}/{}", addr, prefix_len)
+        } else {
+            let arr: [u8; 16] = addr_bytes
+                .try_into()
+                .map_err(|_| "mrs: bad ipv6".to_string())?;
+            let addr = std::net::Ipv6Addr::from(arr);
+            format!("{}/{}", addr, prefix_len)
+        };
+        entries.push(cidr);
+    }
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
