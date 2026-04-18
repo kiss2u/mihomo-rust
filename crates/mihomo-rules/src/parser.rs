@@ -10,6 +10,8 @@ use crate::domain_wildcard::DomainWildcardRule;
 use crate::dscp::DscpRule;
 use crate::final_rule::FinalRule;
 use crate::geoip::GeoIpRule;
+use crate::geosite::GeositeDB;
+use crate::geosite_rule::GeoSiteRule;
 use crate::in_port::InPortRule;
 use crate::ip_asn::IpAsnRule;
 use crate::ip_suffix::IpSuffixRule;
@@ -23,9 +25,10 @@ use crate::src_geoip::SrcGeoIpRule;
 use crate::uid::UidRule;
 
 /// Shared context for `parse_rule` — carries resources that context-requiring
-/// rule types (GEOIP, SRC-GEOIP, IP-ASN) need in order to build themselves.
-/// Callers that don't use any such rule types can pass [`ParserContext::empty`].
-#[derive(Clone, Debug, Default)]
+/// rule types (GEOIP, SRC-GEOIP, IP-ASN, GEOSITE) need in order to build
+/// themselves. Callers that don't use any such rule types can pass
+/// [`ParserContext::empty`].
+#[derive(Clone, Default)]
 pub struct ParserContext {
     /// Optional GeoIP (Country) MaxMindDB reader, shared across all GEOIP and
     /// SRC-GEOIP rules built through this context. `None` means those rules
@@ -35,11 +38,51 @@ pub struct ParserContext {
     /// triggers a parse-time hard-error on any `IP-ASN` payload — silent
     /// skipping would misroute ASN-gated traffic (Class A per ADR-0002).
     pub asn: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+    /// Optional geosite database for `GEOSITE` rules. Unlike GEOIP/ASN,
+    /// absence does NOT hard-error at parse time — per spec §Divergences
+    /// #3, GEOSITE tolerates an absent DB (always-no-match) so that configs
+    /// which conditionally load the DB still parse cleanly. A warn is
+    /// emitted by the loader's discovery path, not here.
+    pub geosite: Option<Arc<GeositeDB>>,
+    /// Internal state for warn-once on `GEOSITE,<category>@<suffix>` —
+    /// tracks whether the `@`-suffix deprecation warn has fired for this
+    /// parse context.
+    ///
+    /// Shared via `Arc<AtomicBool>` so that `ParserContext` remains `Clone`
+    /// and can be passed to rule-provider inner parsers without resetting.
+    /// Marked `#[doc(hidden)]` because it is an implementation detail of
+    /// `warn_once_at_suffix`; callers should construct `ParserContext` via
+    /// `..Default::default()` or struct update syntax and should not set
+    /// this field directly.
+    #[doc(hidden)]
+    pub geosite_at_suffix_warned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::fmt::Debug for ParserContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParserContext")
+            .field("geoip", &self.geoip.is_some())
+            .field("asn", &self.asn.is_some())
+            .field("geosite", &self.geosite.is_some())
+            .finish()
+    }
 }
 
 impl ParserContext {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    fn warn_once_at_suffix(&self, category_raw: &str) {
+        use std::sync::atomic::Ordering;
+        if self.geosite_at_suffix_warned.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tracing::warn!(
+            rule = %category_raw,
+            "GEOSITE '@' attribute suffix parsed but filtering is not implemented; \
+             the suffix is stripped and the full category is used (Class B per ADR-0002)"
+        );
     }
 }
 
@@ -112,6 +155,22 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
                 "SRC-GEOIP rule requires a GeoIP database, but none is configured".to_string()
             })?;
             Ok(Box::new(SrcGeoIpRule::new(payload, adapter, reader)))
+        }
+        "GEOSITE" => {
+            if payload.contains('@') {
+                ctx.warn_once_at_suffix(payload);
+            }
+            let category = payload.split('@').next().unwrap_or("").trim();
+            if category.is_empty() {
+                return Err("GEOSITE rule requires a category name".to_string());
+            }
+            let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            Ok(Box::new(GeoSiteRule::new(
+                payload,
+                adapter,
+                ctx.geosite.clone(),
+                no_resolve,
+            )))
         }
         "IN-PORT" => InPortRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "DSCP" => DscpRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
@@ -448,5 +507,55 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("GEOIP"), "unexpected error: {}", err);
+    }
+
+    // ─── GEOSITE (M1.D-2) ───────────────────────────────────────────
+
+    /// G1 — parse dispatches GEOSITE to GeoSiteRule.
+    #[test]
+    fn test_parse_geosite_dispatches() {
+        let rule = parse_rule("GEOSITE,cn,DIRECT", &ctx()).unwrap();
+        assert_eq!(rule.rule_type().to_string(), "GEOSITE");
+        assert_eq!(rule.adapter(), "DIRECT");
+    }
+
+    /// G2 — parser honours the no-resolve flag.
+    #[test]
+    fn test_parse_geosite_no_resolve_flag() {
+        let rule = parse_rule("GEOSITE,cn,DIRECT,no-resolve", &ctx()).unwrap();
+        assert!(!rule.should_resolve_ip());
+        let rule = parse_rule("GEOSITE,cn,DIRECT", &ctx()).unwrap();
+        assert!(rule.should_resolve_ip());
+    }
+
+    /// G3 — empty category hard-errors.
+    #[test]
+    fn test_parse_geosite_missing_category_errors() {
+        let err = parse_rule("GEOSITE,,DIRECT", &ctx())
+            .err()
+            .expect("GEOSITE with empty category must error");
+        assert!(err.contains("GEOSITE"), "unexpected error: {}", err);
+    }
+
+    /// G4 — missing target (no adapter slot) hard-errors.
+    #[test]
+    fn test_parse_geosite_missing_target_errors() {
+        let err = parse_rule("GEOSITE,cn", &ctx())
+            .err()
+            .expect("GEOSITE without target must error");
+        assert!(
+            err.contains("rule needs at least 3 parts"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    /// GEOSITE parses successfully without a DB (Class A divergence from
+    /// upstream — upstream errors at parse; we tolerate and warn+no-match).
+    /// upstream: rules/geosite.go — errors at parse if DB absent.
+    /// NOT a parse error here.
+    #[test]
+    fn test_parse_geosite_without_db_tolerated() {
+        assert!(parse_rule("GEOSITE,cn,DIRECT", &ctx()).is_ok());
     }
 }
