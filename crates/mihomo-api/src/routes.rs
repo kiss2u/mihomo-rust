@@ -147,7 +147,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/connections", get(get_connections))
         .route("/connections/{id}", delete(close_connection))
         .route("/connections", delete(close_all_connections))
-        .route("/configs", get(get_configs).patch(update_configs))
+        .route(
+            "/configs",
+            get(get_configs).patch(update_configs).put(put_configs),
+        )
+        .route("/metrics", get(get_metrics))
         .route("/traffic", get(get_traffic))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -1039,6 +1043,240 @@ async fn get_group_delay(
         return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
     }
     Json(result).into_response()
+}
+
+// ── Config reload (M1.G-10) ──────────────────────────────────────────
+// upstream: hub/server.go::patchConfig
+// Class B per ADR-0002: payload must be base64 (upstream inconsistent); YAML parse errors
+// always return 400 even with force=true; NOT upstream silent broken-config apply.
+
+#[derive(Deserialize)]
+struct PutConfigsBody {
+    path: Option<String>,
+    payload: Option<String>,
+}
+
+async fn put_configs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<PutConfigsBody>,
+) -> Response {
+    let force = params.get("force").map(|v| v == "true").unwrap_or(false);
+
+    let yaml =
+        match (body.path, body.payload) {
+            (Some(p), _) => match tokio::fs::read_to_string(&p).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"message": e.to_string()})),
+                    )
+                        .into_response()
+                }
+            },
+            (_, Some(b64)) => {
+                use base64::engine::general_purpose::STANDARD;
+                use base64::Engine as _;
+                let bytes = match STANDARD.decode(&b64) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"message": "payload is not valid base64"})),
+                        )
+                            .into_response()
+                    }
+                };
+                match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"message": "payload is not valid UTF-8"})),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+            _ => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"message": "request body must contain 'path' or 'payload'"}),
+                ),
+            )
+                .into_response(),
+        };
+
+    // YAML syntax check — always 400 even with force=true (per spec)
+    let raw_config: RawConfig = match serde_yaml::from_str(&yaml) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"message": format!("config parse error: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    // Semantic rebuild (proxy/rule parsing)
+    let resolver = state.tunnel.resolver().clone();
+    let (proxies, rules) =
+        match mihomo_config::rebuild_from_raw_with_resolver(&raw_config, Some(resolver)) {
+            Ok(r) => r,
+            Err(e) => {
+                if force {
+                    tracing::error!("config reload forced despite validation error: {e}");
+                    (Default::default(), Vec::new())
+                } else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"message": format!("config validation error: {e}")}),
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+    // Cold reload: close all connections with structured log (Class A divergence from upstream)
+    let stats = state.tunnel.statistics();
+    let dropped = stats.active_connection_count();
+    stats.close_all_connections();
+    if dropped > 0 {
+        tracing::warn!(
+            connections_dropped = dropped,
+            "connections force-closed after reload drain timeout"
+        );
+    }
+
+    state.tunnel.update_proxies(proxies);
+    state.tunnel.update_rules(rules);
+    if let Some(mode_str) = &raw_config.mode {
+        if let Ok(mode) = mode_str.parse::<TunnelMode>() {
+            state.tunnel.set_mode(mode);
+        }
+    }
+    *state.raw_config.write() = raw_config;
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Prometheus metrics (M1.H-2) ──────────────────────────────────────
+// upstream: N/A — mihomo-rust enhancement; Go mihomo has no native /metrics endpoint.
+
+async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
+    use prometheus_client::encoding::text::encode;
+    use prometheus_client::metrics::counter::Counter;
+    use prometheus_client::metrics::family::Family;
+    use prometheus_client::metrics::gauge::Gauge;
+    use prometheus_client::registry::Registry;
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+
+    let mut registry = Registry::default();
+    let stats = state.tunnel.statistics();
+    let (upload_total, download_total) = stats.snapshot();
+
+    // mihomo_traffic_bytes — counter{direction}
+    let traffic = Family::<Vec<(String, String)>, Counter<u64, AtomicU64>>::default();
+    traffic
+        .get_or_create(&vec![("direction".to_string(), "upload".to_string())])
+        .inc_by(upload_total.max(0) as u64);
+    traffic
+        .get_or_create(&vec![("direction".to_string(), "download".to_string())])
+        .inc_by(download_total.max(0) as u64);
+    registry.register(
+        "mihomo_traffic_bytes",
+        "Cumulative bytes transferred since process start",
+        traffic,
+    );
+
+    // mihomo_connections_active — gauge
+    let connections_active = Gauge::<i64, AtomicI64>::default();
+    connections_active.set(stats.active_connection_count() as i64);
+    registry.register(
+        "mihomo_connections_active",
+        "Number of currently open connections",
+        connections_active,
+    );
+
+    // mihomo_proxy_alive and mihomo_proxy_delay_ms — gauge{proxy_name,adapter_type}
+    let proxy_alive = Family::<Vec<(String, String)>, Gauge<i64, AtomicI64>>::default();
+    let proxy_delay = Family::<Vec<(String, String)>, Gauge<i64, AtomicI64>>::default();
+    for (name, proxy) in state.tunnel.proxies() {
+        let labels = vec![
+            ("proxy_name".to_string(), name),
+            ("adapter_type".to_string(), proxy.adapter_type().to_string()),
+        ];
+        proxy_alive
+            .get_or_create(&labels)
+            .set(if proxy.alive() { 1 } else { 0 });
+        // Omit delay series entirely when no health check has run (empty history).
+        // NOT -1, NOT 0 — absence is the correct Prometheus signal for "unknown".
+        if !proxy.delay_history().is_empty() {
+            proxy_delay
+                .get_or_create(&labels)
+                .set(proxy.last_delay() as i64);
+        }
+    }
+    registry.register(
+        "mihomo_proxy_alive",
+        "Proxy alive status (1=alive, 0=dead)",
+        proxy_alive,
+    );
+    registry.register(
+        "mihomo_proxy_delay_ms",
+        "Last measured proxy round-trip delay in milliseconds",
+        proxy_delay,
+    );
+
+    // mihomo_rules_matched — counter{rule_type,action}
+    let rules_matched = Family::<Vec<(String, String)>, Counter<u64, AtomicU64>>::default();
+    for ((rule_type, action), count) in stats.rule_match.snapshot() {
+        rules_matched
+            .get_or_create(&vec![
+                ("rule_type".to_string(), rule_type.to_string()),
+                ("action".to_string(), action.to_string()),
+            ])
+            .inc_by(count);
+    }
+    registry.register(
+        "mihomo_rules_matched",
+        "Cumulative rule matches by type and action",
+        rules_matched,
+    );
+
+    // mihomo_memory_rss_bytes — gauge
+    let memory_rss = Gauge::<i64, AtomicI64>::default();
+    memory_rss.set(read_rss_bytes() as i64);
+    registry.register(
+        "mihomo_memory_rss_bytes",
+        "Current process RSS in bytes",
+        memory_rss,
+    );
+
+    // mihomo_info — gauge{version,mode} always = 1
+    let info = Family::<Vec<(String, String)>, Gauge<i64, AtomicI64>>::default();
+    info.get_or_create(&vec![
+        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+        ("mode".to_string(), state.tunnel.mode().to_string()),
+    ])
+    .set(1);
+    registry.register("mihomo_info", "Mihomo runtime info", info);
+
+    let mut body = String::new();
+    encode(&mut body, &registry).expect("prometheus text encoding is infallible");
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 // ── WebSocket: log stream ────────────────────────────────────────────

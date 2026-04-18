@@ -32,6 +32,39 @@ pub enum RuleType {
     SubRule,
 }
 
+impl RuleType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleType::Domain => "DOMAIN",
+            RuleType::DomainSuffix => "DOMAIN-SUFFIX",
+            RuleType::DomainKeyword => "DOMAIN-KEYWORD",
+            RuleType::DomainRegex => "DOMAIN-REGEX",
+            RuleType::GeoSite => "GEOSITE",
+            RuleType::GeoIp => "GEOIP",
+            RuleType::SrcGeoIp => "SRC-GEOIP",
+            RuleType::IpCidr => "IP-CIDR",
+            RuleType::SrcIpCidr => "SRC-IP-CIDR",
+            RuleType::SrcPort => "SRC-PORT",
+            RuleType::DstPort => "DST-PORT",
+            RuleType::InPort => "IN-PORT",
+            RuleType::Dscp => "DSCP",
+            RuleType::ProcessName => "PROCESS-NAME",
+            RuleType::ProcessPath => "PROCESS-PATH",
+            RuleType::Network => "NETWORK",
+            RuleType::Uid => "UID",
+            RuleType::Match => "MATCH",
+            RuleType::RuleSet => "RULE-SET",
+            RuleType::And => "AND",
+            RuleType::Or => "OR",
+            RuleType::Not => "NOT",
+            RuleType::DomainWildcard => "DOMAIN-WILDCARD",
+            RuleType::IpSuffix => "IP-SUFFIX",
+            RuleType::IpAsn => "IP-ASN",
+            RuleType::SubRule => "SUB-RULE",
+        }
+    }
+}
+
 impl fmt::Display for RuleType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

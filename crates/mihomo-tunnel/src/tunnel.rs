@@ -80,6 +80,16 @@ impl TunnelInner {
                 let result = match_engine::match_rules(metadata, &rules);
                 match result {
                     Some(m) => {
+                        let action = if m.adapter_name == "DIRECT" {
+                            "DIRECT"
+                        } else if m.adapter_name.starts_with("REJECT") {
+                            "REJECT"
+                        } else {
+                            "PROXY"
+                        };
+                        self.stats
+                            .rule_match
+                            .increment(m.rule_type.as_str(), action);
                         let proxies = self.proxies.read();
                         let proxy = proxies
                             .get(&m.adapter_name)
@@ -89,7 +99,7 @@ impl TunnelInner {
                                 debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
                                 self.direct.clone() as Arc<dyn ProxyAdapter>
                             });
-                        Some((proxy, m.rule_name, m.rule_payload))
+                        Some((proxy, m.rule_type.to_string(), m.rule_payload))
                     }
                     None => {
                         // No rule matched, use DIRECT
