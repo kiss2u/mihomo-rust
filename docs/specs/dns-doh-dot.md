@@ -1,6 +1,6 @@
 # Spec: Encrypted DNS upstreams (DoH / DoT) and bootstrap
 
-Status: Draft (pm 2026-04-11, awaiting architect review)
+Status: Approved (architect 2026-04-18, amendments applied)
 Owner: pm
 Tracks roadmap items: **M1.E-1** (DoH / DoT upstream clients) and
 **M1.E-2** (`default-nameserver` bootstrap — bundled per roadmap note).
