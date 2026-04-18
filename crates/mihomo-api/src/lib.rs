@@ -1,11 +1,14 @@
+pub mod log_stream;
 pub mod routes;
 pub mod ui;
 
+use log_stream::LogMessage;
 use mihomo_config::raw::RawConfig;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
 
 pub struct ApiServer {
@@ -14,6 +17,7 @@ pub struct ApiServer {
     secret: Option<String>,
     config_path: String,
     raw_config: Arc<RwLock<RawConfig>>,
+    log_tx: broadcast::Sender<LogMessage>,
 }
 
 impl ApiServer {
@@ -23,6 +27,7 @@ impl ApiServer {
         secret: Option<String>,
         config_path: String,
         raw_config: Arc<RwLock<RawConfig>>,
+        log_tx: broadcast::Sender<LogMessage>,
     ) -> Self {
         Self {
             tunnel,
@@ -30,6 +35,7 @@ impl ApiServer {
             secret,
             config_path,
             raw_config,
+            log_tx,
         }
     }
 
@@ -39,6 +45,7 @@ impl ApiServer {
             secret: self.secret.clone(),
             config_path: self.config_path.clone(),
             raw_config: self.raw_config.clone(),
+            log_tx: self.log_tx.clone(),
         });
 
         let app = routes::create_router(state);

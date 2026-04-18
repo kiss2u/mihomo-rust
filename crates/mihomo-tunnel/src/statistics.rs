@@ -76,6 +76,10 @@ impl Statistics {
     pub fn active_connections(&self) -> Vec<ConnectionInfo> {
         self.connections.iter().map(|e| e.value().clone()).collect()
     }
+
+    pub fn close_all_connections(&self) {
+        self.connections.clear();
+    }
 }
 
 impl Default for Statistics {
