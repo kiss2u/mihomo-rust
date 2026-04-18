@@ -52,14 +52,24 @@ affects latency tail or RSS growth over hours.
 
 **HP-1 — TCP relay inner loop.**
 
-Scope: the `poll_read / poll_write / copy_bidirectional`-equivalent code
-between the point where `Tunnel::dispatch()` has returned an established
-outbound stream and the point where EOF / error tears the pair down.
+Scope: the mihomo-side wrapping around `tokio::io::copy_bidirectional`
+in `crates/mihomo-tunnel/src/tcp.rs` — Statistics counter increments,
+drop / teardown bookkeeping, any per-chunk logging or tracing spans.
+The relay itself is already zero-copy via tokio's
+`copy_bidirectional` (engineer-a findings 2026-04-18); HP-1's audit
+verifies the **mihomo wrapper** doesn't allocate per-chunk, not that
+tokio doesn't.
 
 Out of scope: TCP accept, TLS handshake, SOCKS5/HTTP inbound parsing, SS
 AEAD key schedule at connect time, Trojan auth header build, rule match
-at dispatch time (covered by HP-3 separately). Anything that happens
-**once per connection** does not belong here.
+at dispatch time (covered by HP-3 separately). The tokio
+`copy_bidirectional` internals (audited upstream; we rely on its
+documented buffer-reuse behaviour). Anything that happens **once per
+connection** does not belong here.
+
+Given the tight wrapper scope, HP-1 is the **least likely** of the three
+HPs to fail §3 at M1 tip. A clean pass is expected; any failure means
+someone accidentally allocates in a tight teardown loop.
 
 **HP-2 — UDP NAT per-datagram forwarding.**
 
@@ -205,9 +215,44 @@ threshold. Unlike perf regression (ADR-0006 §6), this IS a hard CI gate
 ### 6. Findings handling — the M1 baseline may not pass
 
 This ADR lands before the audit is done. The M1 tip might fail §3 on any
-or all three HPs — especially HP-1 (tokio's `copy_bidirectional` has a
-heap buffer we may or may not be reusing) and HP-3 (GEOIP lookup on
-MMDB allocates if the underlying `maxminddb` crate internally allocates).
+or all three HPs.
+
+**Known M1-tip HP-2 failure (engineer-a findings 2026-04-18).**
+
+`crates/mihomo-tunnel/src/udp.rs:30` does:
+
+```rust
+let key = format!("{}:{}", src, metadata.remote_address());
+```
+
+…on **every UDP packet**, including the fast-path lookup branch. The
+NAT table (`pub type NatTable = Arc<DashMap<String, Arc<UdpSession>>>;`
+at line 14) is keyed by `String`, so every `get()` and every insert
+allocates. At any non-trivial UDP throughput this is a textbook HP-2
+failure.
+
+Fix direction (engineer-a picks concrete shape during Task #31):
+
+- Option A: change `NatTable` key to `(SocketAddr, SocketAddr)` tuple.
+  Zero-alloc, matches the data; requires `DashMap` key trait confirmation
+  — `SocketAddr` implements `Hash + Eq + Clone + Send + Sync` so this is
+  straightforward. Downside: `metadata.remote_address()` returns a
+  `String` today (the dst portion); that needs a `SocketAddr`-returning
+  sibling or a cached parse at metadata build-time.
+- Option B: keep the String key but intern via
+  `Arc<str>` cached per connection. Saves re-allocation on every packet
+  of the same flow. Doesn't help first-packet or insert path; strictly
+  worse than A.
+
+**Option A is strongly preferred.** Option B is the fallback only if
+Metadata restructure is scoped out of M2. If A reveals scope creep
+beyond M2, amend §3 to tolerate HP-2 at a higher threshold with a
+linked M3 follow-up, per the rules below.
+
+Likely HP-3 hazards to audit first: `maxminddb`'s internal allocations
+on GEOIP lookup, and any `to_string()` / `format!` inside rule-name
+formatting in the match path. DOMAIN-SUFFIX trie traversal should
+already be zero-alloc.
 
 If audit shows M1 tip is not at zero:
 
@@ -361,7 +406,9 @@ No user-visible change from this ADR alone.
   per match" is defined here.
 - [ADR-0007](0007-m2-footprint-budget.md) §3 — allocator choice is
   consistent here and there.
-- `crates/mihomo-tunnel/src/tunnel.rs` — where HP-1 inner loop lives.
-- `crates/mihomo-tunnel/src/udp_nat.rs` — HP-2 target path.
+- `crates/mihomo-tunnel/src/tcp.rs` — where HP-1 inner loop lives
+  (the wrapper around `tokio::io::copy_bidirectional`).
+- `crates/mihomo-tunnel/src/udp.rs` — HP-2 target path; line 30 is
+  the known-failing `format!` call (§6).
 - `crates/mihomo-rules/src/rule_set.rs` — HP-3 target path.
 - `dhat-rs` crate docs — Phase A instrumentation.

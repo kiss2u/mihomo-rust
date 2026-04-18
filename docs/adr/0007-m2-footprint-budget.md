@@ -45,10 +45,26 @@ The concrete decisions this ADR settles:
 
 ## Decision
 
-### 1. Two build profiles, three supported targets
+### 1. Two build profiles, two hard-gated targets + one soft target
 
-mihomo-rust releases in M2 publish six binaries: `{minimal, default} ×
-{aarch64-linux-musl, mipsel-linux-musl, x86_64-linux-musl}`.
+mihomo-rust releases in M2 publish **four hard-gated binaries** —
+`{minimal, default} × {aarch64-linux-musl, x86_64-linux-musl}` — and
+**two soft-gated binaries** on `mipsel-linux-musl` (measured and
+published, not release-blocking). See §4 for what hard vs soft means.
+
+**M1-tip reality check (engineer-b findings 2026-04-18).**
+
+Current `cargo build --release --no-default-features` produces the SAME
+~11 MiB aarch64 binary as `--release` with defaults. Reason: SS, Direct,
+Reject, rustls, and hickory-server are unconditionally compiled — no
+Cargo feature gates exist around them. So "minimal build" is **not
+defined in the shippable tree today**; the §2 caps below are the
+**post-gating** targets, not a current measurement.
+
+This means the §2 targets are unreachable without prerequisite work (see
+§Migration step 0). The ADR commits to the numbers; engineer-b commits
+to the gating that makes them reachable. If gating work reveals a number
+is the wrong target, a §6 amendment adjusts the ADR, not the ambition.
 
 **Profile: `minimal`** — the embedded-router build.
 
@@ -79,17 +95,28 @@ Clash Meta install (`tls,ws,grpc,h2,httpupgrade,vless,...`). The feature list
 is defined by `mihomo-app/Cargo.toml`'s `[features] default = [...]`, not
 here — this ADR freezes the *budget*, not the *contents* of the default set.
 
-**Targets — why three and not more:**
+**Targets — why two hard, one soft:**
 
-| Target | Rationale |
-|--------|-----------|
-| `aarch64-unknown-linux-musl` | Modern routers + SBCs (EdgeRouter, RPi 4+, Mikrotik CCR). Biggest user base outside x86. |
-| `mipsel-unknown-linux-musl` | Legacy MIPS routers (OpenWRT, budget boxes). Tightest size target; worst-case test. |
-| `x86_64-unknown-linux-musl` | VPS + desktop Linux. Reference target for all perf work in ADR-0006. |
+| Target | Gate class | Rationale |
+|--------|------------|-----------|
+| `aarch64-unknown-linux-musl` | **hard** | Modern routers + SBCs (EdgeRouter, RPi 4+, Mikrotik CCR). Biggest user base outside x86. |
+| `x86_64-unknown-linux-musl` | **hard** | VPS + desktop Linux. Reference target for all perf work in ADR-0006. |
+| `mipsel-unknown-linux-musl` | **soft** | Legacy MIPS routers (OpenWRT, budget boxes). Tightest-budget target, but no mipsel cross-compile infra at M1 tip and no QEMU smoke-test runner. CI measures and publishes size; overrun warns, does NOT block the release. Fully hard-gated in M3 if an operator asks. |
 
 Not shipping in M2 (explicitly): `armv7-musl` (covered by aarch64 for M2
-priorities), `mips-musl` (big-endian is vanishing), Windows, macOS-universal,
-any glibc target. Those are future releases.
+priorities), `mips-musl` (big-endian is vanishing), Windows,
+macOS-universal, any glibc target. Those are future releases.
+
+**Why mipsel is soft for M2:** roadmap §M2 item 3 names mipsel-musl
+explicitly, but the current tree has zero mipsel build infrastructure
+and no way to functionally validate a mipsel binary (no QEMU runner,
+no CI cross-toolchain). Making mipsel a hard release-gate would block
+every M2 release on an arch-specific rabbit hole that benefits a
+shrinking user base (most new routers are aarch64). Publishing the
+size and warning on overrun captures the spirit of the roadmap item
+without taking a hard dependency. If the M2 soft number trends in the
+right direction, M3 promotes mipsel to hard-gate with an ADR
+amendment.
 
 ### 2. Byte budgets per (profile × target)
 
@@ -160,7 +187,7 @@ Post-build: `strip --strip-all` before size measurement. UPX compression
 is not allowed (breaks `/proc/self/exe` on some kernels, flagged by antivirus
 heuristics, hides the real binary size story).
 
-### 4. CI enforcement — hard gate on release tag workflow
+### 4. CI enforcement — hard gate on aarch64/x86_64; soft on mipsel
 
 Release workflow (the one that publishes artefacts) includes a step that,
 per (profile, target) in §1:
@@ -169,20 +196,24 @@ per (profile, target) in §1:
 2. Runs `strip --strip-all`.
 3. Measures file size in bytes.
 4. Compares to the cap in §2.
-5. On overrun, **fails the workflow** with:
-   ```
-   ERROR: binary size budget exceeded
-   target=<t> profile=<p> actual=<n> cap=<c> overshoot=<n-c> bytes
-   ```
-   and aborts the release.
+5. Per target gate class:
+   - **Hard targets (aarch64, x86_64):** on overrun, **fails the
+     workflow** with:
+     ```
+     ERROR: binary size budget exceeded
+     target=<t> profile=<p> actual=<n> cap=<c> overshoot=<n-c> bytes
+     ```
+     and aborts the release.
+   - **Soft target (mipsel):** on overrun, emits the same message at
+     `warning` level, records it in the release summary, and proceeds.
 
-This is a **hard gate**. Unlike the perf regression in ADR-0006 §6, binary
-size is cheap to measure deterministically — there is no noise to false-
-positive on. A cap overrun is a real regression.
+Binary size is cheap to measure deterministically — there is no noise to
+false-positive on. A hard-target cap overrun is a real regression.
+A soft-target overrun is a signal, not a block.
 
-Per-PR CI also measures and posts, but does NOT fail the build (same as
-perf — feature PRs can carry temporary size regressions that land after
-an optimisation PR follows).
+Per-PR CI also measures and posts for all three targets, but does NOT
+fail the build (same as perf — feature PRs can carry temporary size
+regressions that land after an optimisation PR follows).
 
 ### 5. Size attribution — `cargo-bloat` on every release
 
@@ -304,13 +335,34 @@ is the right level (§4).
 
 Engineer-b (Task #28) executes:
 
+0. **Prerequisite — feature-gate the unconditional deps** (engineer-b
+   findings 2026-04-18). Today `--no-default-features` produces the same
+   ~11 MiB aarch64 binary as the default build because SS, Direct, Reject,
+   rustls (TLS), and hickory-server are unconditionally compiled. Before
+   any §2 measurement is meaningful, add Cargo features for each:
+   - `ss` (Shadowsocks + AEAD crates),
+   - `trojan` (Trojan adapter — already partly gated via `mihomo-transport`),
+   - `tls` (rustls + webpki + ALPN — may already exist via
+     `mihomo-transport::tls`; verify),
+   - `dns-server` (hickory-server; distinct from `dns-client` for DoH/DoT
+     upstream, so a minimal build can keep the UDP server without pulling
+     rustls into the resolver path),
+   - `direct` and `reject` always-on is fine — they are trivial. No gate
+     needed.
+   The `minimal` profile of §1 composes these gates. Without this step,
+   every §2 row is unreachable.
 1. Set release profile in §3 in `Cargo.toml` workspace section. Run
-   current-tip builds for all six (profile, target) pairs, record sizes
-   in `docs/benchmarks/hardware.md`.
-2. If any measurement exceeds §2 cap at M1 tip, open an amendment PR to
-   this ADR with the real number + justification before M2 exit.
-3. Wire the CI gate in §4 + the `cargo-bloat` forensic output in §5.
-4. Add mipsel `cross` target to CI build matrix (no runtime test).
+   current-tip builds for all four hard (profile, target) pairs, record
+   sizes in `docs/benchmarks/hardware.md`.
+2. If any measurement exceeds §2 cap at M1 tip (after step 0 gating),
+   open an amendment PR to this ADR with the real number +
+   justification before M2 exit.
+3. Wire the CI gate in §4 (hard for aarch64/x86_64; soft/warn for
+   mipsel) + the `cargo-bloat` forensic output in §5.
+4. Add mipsel `cross` target to CI build matrix (size measurement only,
+   no runtime test). If mipsel cross-compile proves significantly
+   difficult, defer the mipsel entries to M3 with an amendment PR —
+   do not block M2 on mipsel toolchain work.
 
 Feature-set tuning (which Cargo features belong to `minimal` vs
 `default`) is per-crate engineer-b work in M2; the sets in §1 are the

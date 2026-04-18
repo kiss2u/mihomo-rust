@@ -48,6 +48,17 @@ The existing `mihomo-bench` covers three (throughput, latency, conn-rate);
 this ADR **adds** two (DNS QPS, rule-match throughput) and freezes the mix.
 An M2 exit claim must include results from all five.
 
+**Two harnesses, both required:**
+
+- **`mihomo-bench`** (macro; `cargo run --release -p mihomo-bench`) —
+  authoritative for W1/W2/W3/W4. End-to-end binary-under-test measurement.
+- **`criterion`** (micro; `cargo bench -p mihomo-rules` and similar) —
+  authoritative for W5 and any future sub-component work. No criterion
+  benches exist at M1 tip; engineer-a adds the W5 harness under
+  `crates/mihomo-rules/benches/` as Task #27's first deliverable.
+
+A run that skips either harness does not count toward M2 exit.
+
 | # | Workload | Driver | Metric(s) | Primary answer |
 |---|----------|--------|-----------|----------------|
 | W1 | **Bulk throughput** | `bench_throughput` — 1× large transfer (16 MiB, 64 MiB) + small-msg round-trips | sustained Gbps (large), msgs/s (small) | does relay keep up with the NIC? |
