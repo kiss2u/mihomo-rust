@@ -1,6 +1,6 @@
 # Spec: Proxy providers (M1.H-1)
 
-Status: Draft (pm 2026-04-11, architect-approved 2026-04-11, amendments applied)
+Status: Approved (architect 2026-04-11, amendments applied)
 Owner: pm
 Tracks roadmap item: **M1.H-1**
 Related roadmap: **M1.G-6** (`GET/PUT /providers/proxies[/:name]` API),
