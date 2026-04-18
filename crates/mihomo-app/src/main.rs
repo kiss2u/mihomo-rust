@@ -55,13 +55,27 @@ fn main() -> Result<()> {
         return handle_service_command(cmd, &args);
     }
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize logging + log broadcast channel for GET /logs WebSocket.
+    // The broadcast layer is NOT wrapped in EnvFilter so dashboard clients see
+    // all events regardless of RUST_LOG; per-connection ?level= filtering applies.
+    let log_tx = {
+        use mihomo_api::log_stream::LogBroadcastLayer;
+        use tokio::sync::broadcast;
+        use tracing_subscriber::prelude::*;
+
+        let (tx, _) = broadcast::channel(128);
+        let log_layer = LogBroadcastLayer { tx: tx.clone() };
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer().with_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                ),
+            )
+            .with(log_layer)
+            .init();
+        tx
+    };
 
     info!("mihomo-rust starting...");
 
@@ -96,7 +110,7 @@ fn main() -> Result<()> {
     runtime.block_on(async move {
         let config = load_config(&config_path).await?;
         info!("Config loaded from {}", config_path);
-        run(config, config_path).await
+        run(config, config_path, log_tx).await
     })
 }
 
@@ -379,7 +393,11 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
+async fn run(
+    config: mihomo_config::Config,
+    config_path: String,
+    log_tx: tokio::sync::broadcast::Sender<mihomo_api::log_stream::LogMessage>,
+) -> Result<()> {
     // Keep raw config in shared state for runtime mutations
     let raw_config = Arc::new(RwLock::new(config.raw.clone()));
 
@@ -407,6 +425,7 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
             config.api.secret.clone(),
             config_path.clone(),
             raw_config.clone(),
+            log_tx.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {

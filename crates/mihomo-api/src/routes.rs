@@ -1,4 +1,5 @@
 use axum::{
+    extract::ws::{Message, WebSocketUpgrade},
     extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
@@ -11,13 +12,15 @@ use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info};
 
+use crate::log_stream::{parse_log_level, LogMessage};
 use crate::ui;
 
 pub struct AppState {
@@ -26,6 +29,8 @@ pub struct AppState {
     pub secret: Option<String>,
     pub config_path: String,
     pub raw_config: Arc<RwLock<RawConfig>>,
+    /// Fan-out channel for log events. Each WS client subscribes a Receiver.
+    pub log_tx: broadcast::Sender<LogMessage>,
 }
 
 impl AppState {
@@ -73,10 +78,59 @@ async fn require_auth(State(state): State<Arc<AppState>>, req: Request, next: Ne
     }
 }
 
+/// Auth middleware for WebSocket upgrade routes. Accepts `Authorization: Bearer <secret>`
+/// header OR `?token=<secret>` query param (browser WebSocket clients cannot set headers).
+/// `?token=` is accepted ONLY on this middleware — REST routes keep header-only auth.
+async fn require_auth_ws(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !state.auth_required() {
+        return next.run(req).await;
+    }
+    let expected = state.secret.as_deref().unwrap_or("");
+
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        });
+
+    let token_param = query.get("token").map(|s| s.as_str());
+    let provided = bearer.or(token_param);
+
+    // TODO(task#33): apply constant-time comparison here when that task lands,
+    // matching the same fix applied to require_auth above.
+    let ok = match provided {
+        Some(t) if t.len() == expected.len() => {
+            use subtle::ConstantTimeEq;
+            t.as_bytes().ct_eq(expected.as_bytes()).into()
+        }
+        _ => false,
+    };
+    if ok {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+    }
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
-    // API routes gated behind the Bearer middleware. When the configured
-    // secret is empty/None the middleware short-circuits, so tests and
-    // unauthenticated deployments continue to work.
+    // WS routes — accept header or ?token= query param for browser dashboard compat.
+    let ws_routes = Router::new()
+        .route("/logs", get(get_logs))
+        .route("/memory", get(get_memory))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth_ws,
+        ));
+
+    // REST API routes gated behind the Bearer middleware (header-only).
     let api = Router::new()
         .route("/", get(hello))
         .route("/version", get(version))
@@ -92,9 +146,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/rules/reorder", post(reorder_rules))
         .route("/connections", get(get_connections))
         .route("/connections/{id}", delete(close_connection))
+        .route("/connections", delete(close_all_connections))
         .route("/configs", get(get_configs).patch(update_configs))
         .route("/traffic", get(get_traffic))
-        .route("/dns/query", post(dns_query))
+        .route("/dns/query", get(dns_query_get).post(dns_query))
+        .route("/cache/dns/flush", post(flush_dns_cache))
         // Config save
         .route("/api/config/save", post(save_config))
         // Subscriptions
@@ -128,7 +184,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/ui", get(ui::serve_ui))
         .route("/ui/{*rest}", get(ui::serve_ui));
 
-    api.merge(ui)
+    api.merge(ws_routes)
+        .merge(ui)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -383,6 +440,27 @@ async fn dns_query(
     let result = resolver.resolve_ip(&body.name).await;
     let _ = body.qtype;
     Json(serde_json::json!({ "name": body.name, "answer": result.map(|ip| ip.to_string()) }))
+}
+
+// upstream: hub/route/dns.go — GET alias added alongside existing POST.
+// Class B per ADR-0002: POST kept for back-compat; GET matches upstream's current form.
+async fn dns_query_get(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DnsQueryRequest>,
+) -> Json<serde_json::Value> {
+    let resolver = state.tunnel.resolver();
+    let result = resolver.resolve_ip(&params.name).await;
+    Json(serde_json::json!({ "name": params.name, "answer": result.map(|ip| ip.to_string()) }))
+}
+
+async fn flush_dns_cache(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.tunnel.resolver().clear_cache();
+    StatusCode::NO_CONTENT
+}
+
+async fn close_all_connections(State(state): State<Arc<AppState>>) -> StatusCode {
+    state.tunnel.statistics().close_all_connections();
+    StatusCode::NO_CONTENT
 }
 
 // ── Config save ──────────────────────────────────────────────────────
@@ -961,4 +1039,103 @@ async fn get_group_delay(
         return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
     }
     Json(result).into_response()
+}
+
+// ── WebSocket: log stream ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LogsParams {
+    level: Option<String>,
+}
+
+// upstream: hub/route/logs.go::getLogs
+async fn get_logs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<LogsParams>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let level = parse_log_level(params.level.as_deref().unwrap_or("info"));
+    let mut rx = state.log_tx.subscribe();
+    ws.on_upgrade(move |mut socket| async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) if msg.level >= level => {
+                    let json = serde_json::to_string(&msg).unwrap_or_default();
+                    if socket.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    let lag_msg = format!("{{\"type\":\"lagged\",\"missed\":{}}}", n);
+                    if socket.send(Message::Text(lag_msg.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+// ── WebSocket: memory stream ─────────────────────────────────────────
+
+// upstream: hub/route/memory.go
+async fn get_memory(State(_state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|mut socket| async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let inuse = read_rss_bytes();
+            let oslimit = read_os_memory_limit();
+            let msg = serde_json::json!({ "inuse": inuse, "oslimit": oslimit });
+            if socket
+                .send(Message::Text(msg.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+fn read_rss_bytes() -> u64 {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(std::process::id());
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+}
+
+fn read_os_memory_limit() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        read_os_memory_limit_linux()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_os_memory_limit_linux() -> u64 {
+    // Try cgroup v2 memory limit first, fall back to rlimit.
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Ok(n) = s.trim().parse::<u64>() {
+            return n;
+        }
+    }
+    // rlimit RLIMIT_AS (virtual address space) as a proxy; RLIMIT_RSS is deprecated.
+    unsafe {
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_AS, &mut rl) == 0 && rl.rlim_cur != libc::RLIM_INFINITY {
+            return rl.rlim_cur;
+        }
+    }
+    0
 }

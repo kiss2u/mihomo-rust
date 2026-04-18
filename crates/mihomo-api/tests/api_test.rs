@@ -8,7 +8,12 @@ use mihomo_trie::DomainTrie;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tower::ServiceExt;
+
+fn test_log_tx() -> broadcast::Sender<mihomo_api::log_stream::LogMessage> {
+    broadcast::channel(16).0
+}
 
 fn test_raw_config() -> RawConfig {
     RawConfig {
@@ -46,6 +51,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         secret: None,
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
+        log_tx: test_log_tx(),
     })
 }
 
@@ -75,6 +81,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         secret: Some(secret.to_string()),
         config_path,
         raw_config: Arc::new(RwLock::new(raw)),
+        log_tx: test_log_tx(),
     })
 }
 
@@ -1503,6 +1510,7 @@ mod delay_support {
             secret: None,
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
+            log_tx: tokio::sync::broadcast::channel(16).0,
         })
     }
 
@@ -1549,6 +1557,7 @@ mod delay_support {
             secret: Some(secret.to_string()),
             config_path,
             raw_config: Arc::new(RwLock::new(test_raw_config())),
+            log_tx: tokio::sync::broadcast::channel(16).0,
         })
     }
 }
