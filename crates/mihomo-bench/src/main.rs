@@ -1,5 +1,6 @@
 mod bench_binary_size;
 mod bench_connrate;
+mod bench_dns;
 mod bench_latency;
 mod bench_memory;
 mod bench_throughput;
@@ -27,9 +28,17 @@ struct Args {
     #[arg(long)]
     go_binary: Option<PathBuf>,
 
-    /// Benchmark config file
+    /// Benchmark config file (SOCKS5 workloads W1–W3)
     #[arg(long, default_value = "config-bench.yaml")]
     config: PathBuf,
+
+    /// DNS benchmark config file (W4); if absent, DNS bench is skipped
+    #[arg(long)]
+    dns_config: Option<PathBuf>,
+
+    /// UDP port that the DNS bench config listens on
+    #[arg(long, default_value = "15353")]
+    dns_port: u16,
 
     /// JSON output file (stdout if omitted)
     #[arg(long)]
@@ -71,6 +80,39 @@ async fn wait_for_port(addr: SocketAddr, timeout: Duration) -> anyhow::Result<()
     }
 }
 
+async fn wait_for_udp_port(addr: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
+    use hickory_proto::op::{Message, MessageType, OpCode, Query};
+    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::serialize::binary::BinEncodable;
+    use tokio::net::UdpSocket;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let sock = UdpSocket::bind("127.0.0.1:0").await?;
+
+    let mut msg = Message::new();
+    msg.set_id(0);
+    msg.set_message_type(MessageType::Query);
+    msg.set_op_code(OpCode::Query);
+    msg.set_recursion_desired(true);
+    let name: Name = "ping.invalid.".parse()?;
+    msg.add_query(Query::query(name, RecordType::A));
+    let probe = msg.to_bytes()?;
+
+    loop {
+        let _ = sock.send_to(&probe, addr).await;
+        let mut buf = [0u8; 512];
+        let ready =
+            tokio::time::timeout(Duration::from_millis(200), sock.recv_from(&mut buf)).await;
+        if ready.is_ok() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("timeout waiting for DNS port {} to become reachable", addr);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn benchmark_target(
     binary: &Path,
     config: &Path,
@@ -85,7 +127,7 @@ async fn benchmark_target(
 
     eprintln!("[{}] starting proxy: {}", target_name, binary.display());
 
-    // Start proxy process
+    // Start proxy process (SOCKS5 config for W1–W3)
     let mut child = Command::new(binary)
         .args(["-f", &config.to_string_lossy()])
         .stdout(Stdio::null())
@@ -95,7 +137,7 @@ async fn benchmark_target(
 
     let pid = child.id();
 
-    // Wait for port to be ready
+    // Wait for SOCKS5 port to be ready
     if let Err(e) = wait_for_port(proxy_addr, Duration::from_secs(10)).await {
         let _ = child.kill();
         let _ = child.wait();
@@ -136,7 +178,7 @@ async fn benchmark_target(
     let run_all = args.only.is_none();
     let only = args.only.as_deref().unwrap_or("");
 
-    // Throughput
+    // W1 — Throughput
     eprintln!("[{}] benchmarking throughput...", target_name);
     let throughput = if run_all || only == "throughput" {
         bench_throughput::bench_throughput(proxy_addr, echo_addr).await?
@@ -144,7 +186,7 @@ async fn benchmark_target(
         vec![]
     };
 
-    // Latency
+    // W2 — Latency
     eprintln!("[{}] benchmarking latency...", target_name);
     let latency = if run_all || only == "latency" {
         bench_latency::bench_latency(proxy_addr, echo_addr, args.latency_iterations).await?
@@ -159,7 +201,7 @@ async fn benchmark_target(
         }
     };
 
-    // Connection rate (also measures peak RSS concurrently)
+    // W3 — Connection rate (also measures peak RSS concurrently)
     eprintln!("[{}] benchmarking connection rate...", target_name);
     let (conn_rate, rss_load) = if run_all || only == "connrate" {
         let rss_handle = tokio::spawn({
@@ -188,15 +230,58 @@ async fn benchmark_target(
         rss_load as f64 / 1048576.0
     );
 
-    // Stop proxy
-    eprintln!("[{}] stopping proxy...", target_name);
+    // Stop the SOCKS5 proxy process before starting the DNS process
+    eprintln!("[{}] stopping SOCKS5 proxy...", target_name);
     let _ = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
     let _ = child.wait();
-
-    // Stop echo server
     echo_handle.abort();
+
+    // W4 — DNS QPS (separate process with DNS-enabled config)
+    let dns = match (run_all || only == "dns", args.dns_config.as_ref()) {
+        (true, Some(dns_config)) => {
+            eprintln!("[{}] starting DNS proxy: {}", target_name, binary.display());
+
+            let mut dns_child = Command::new(binary)
+                .args(["-f", &dns_config.to_string_lossy()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("failed to start DNS proxy: {}", e))?;
+
+            let dns_pid = dns_child.id();
+            let dns_addr: SocketAddr = format!("127.0.0.1:{}", args.dns_port).parse()?;
+
+            let ready = wait_for_udp_port(dns_addr, Duration::from_secs(10)).await;
+            if let Err(e) = ready {
+                let _ = dns_child.kill();
+                let _ = dns_child.wait();
+                eprintln!("[{}] DNS port not ready: {} — skipping W4", target_name, e);
+                None
+            } else {
+                eprintln!("[{}] DNS proxy ready on {}", target_name, dns_addr);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                eprintln!("[{}] benchmarking DNS QPS...", target_name);
+                let dns_result = bench_dns::bench_dns(dns_addr, args.duration).await;
+
+                let _ = Command::new("kill")
+                    .args(["-TERM", &dns_pid.to_string()])
+                    .status();
+                let _ = dns_child.wait();
+
+                match dns_result {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        eprintln!("[{}] DNS bench error: {}", target_name, e);
+                        None
+                    }
+                }
+            }
+        }
+        _ => None,
+    };
 
     Ok(BenchmarkResults {
         target: target_name.to_string(),
@@ -206,6 +291,7 @@ async fn benchmark_target(
         throughput,
         latency,
         conn_rate,
+        dns,
     })
 }
 

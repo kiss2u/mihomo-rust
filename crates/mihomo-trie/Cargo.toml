@@ -6,4 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 
+[[bench]]
+name = "trie_bench"
+harness = false
+
 [dev-dependencies]
+criterion = { workspace = true }

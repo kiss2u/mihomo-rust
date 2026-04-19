@@ -132,6 +132,9 @@ arc-swap = "1"
 boring      = { version = "5.0.2" }
 tokio-boring = { version = "5.0.0" }
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
 # Workspace crates
 mihomo-common = { path = "crates/mihomo-common" }
 mihomo-trie = { path = "crates/mihomo-trie" }

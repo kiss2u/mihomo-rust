@@ -15,5 +15,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 zstd = { workspace = true }
 
+[[bench]]
+name = "rules_bench"
+harness = false
+
 [dev-dependencies]
 tempfile = { workspace = true }
+criterion = { workspace = true }
