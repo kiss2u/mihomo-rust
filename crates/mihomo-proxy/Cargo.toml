@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["vless", "vless-vision"]
+default = ["ss", "trojan", "vless", "vless-vision"]
+ss = ["dep:shadowsocks"]
+trojan = []
 vless = []
 vless-vision = ["vless"]
 
@@ -14,7 +16,7 @@ mihomo-common = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-transport = { workspace = true }
 tokio = { workspace = true }
-shadowsocks = { workspace = true }
+shadowsocks = { workspace = true, optional = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }

@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["listener-http", "listener-socks5", "listener-mixed", "listener-tproxy"]
+listener-http = []
+listener-socks5 = []
+listener-tproxy = []
+listener-mixed = ["listener-http", "listener-socks5"]
+
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }

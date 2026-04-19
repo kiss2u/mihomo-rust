@@ -19,6 +19,8 @@ members = [
 lto = true
 strip = true
 codegen-units = 1
+panic = "abort"
+opt-level = "z"
 
 [workspace.package]
 version = "0.4.0"
@@ -125,6 +127,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Parking lot for sync primitives
 parking_lot = "0.12"
 
+# Global allocator (ADR-0008 — M2 default for all targets)
+mimalloc = { version = "0.1", default-features = false }
+
 # Wait-free read / atomic swap for hot-path rule-set + proxy-provider refreshes
 arc-swap = "1"
 
@@ -136,13 +141,15 @@ tokio-boring = { version = "5.0.0" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 # Workspace crates
+# default-features = false on feature-gated crates so each consumer controls
+# which optional protocols/listeners are compiled (M2.E feature-flag infra).
 mihomo-common = { path = "crates/mihomo-common" }
 mihomo-trie = { path = "crates/mihomo-trie" }
-mihomo-dns = { path = "crates/mihomo-dns" }
+mihomo-dns = { path = "crates/mihomo-dns", default-features = false }
 mihomo-rules = { path = "crates/mihomo-rules" }
 mihomo-transport = { path = "crates/mihomo-transport" }
-mihomo-proxy = { path = "crates/mihomo-proxy" }
+mihomo-proxy = { path = "crates/mihomo-proxy", default-features = false }
 mihomo-tunnel = { path = "crates/mihomo-tunnel" }
-mihomo-listener = { path = "crates/mihomo-listener" }
+mihomo-listener = { path = "crates/mihomo-listener", default-features = false }
 mihomo-api = { path = "crates/mihomo-api" }
-mihomo-config = { path = "crates/mihomo-config" }
+mihomo-config = { path = "crates/mihomo-config", default-features = false }

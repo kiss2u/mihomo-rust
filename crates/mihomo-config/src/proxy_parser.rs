@@ -3,9 +3,13 @@ use mihomo_common::{
     AdapterType, DelayHistory, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, Result,
 };
+#[cfg(feature = "ss")]
+use mihomo_proxy::ShadowsocksAdapter;
+#[cfg(feature = "trojan")]
+use mihomo_proxy::TrojanAdapter;
 use mihomo_proxy::{
     FallbackGroup, HttpAdapter, LbStrategy, LoadBalanceGroup, RelayGroup, SelectorGroup,
-    ShadowsocksAdapter, Socks5Adapter, TransportChain, TrojanAdapter, UrlTestGroup,
+    Socks5Adapter, TransportChain, UrlTestGroup,
 };
 #[cfg(feature = "vless")]
 use mihomo_proxy::{VlessAdapter, VlessFlow};
@@ -87,6 +91,7 @@ pub fn parse_proxy(
         .ok_or("missing proxy type")?;
 
     match proxy_type {
+        #[cfg(feature = "ss")]
         "ss" => {
             let server = config
                 .get("server")
@@ -121,6 +126,7 @@ pub fn parse_proxy(
             .map_err(|e| format!("ss: {}", e))?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        #[cfg(feature = "trojan")]
         "trojan" => {
             let server = config
                 .get("server")

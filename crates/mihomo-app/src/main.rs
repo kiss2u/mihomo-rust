@@ -1,3 +1,8 @@
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dashmap::DashMap;
@@ -7,7 +12,11 @@ use mihomo_config::proxy_provider::ProxyProvider;
 use mihomo_config::raw::RawConfig;
 use mihomo_dns::resolver::Resolver;
 use mihomo_dns::DnsServer;
-use mihomo_listener::{MixedListener, SnifferRuntime, TProxyListener};
+#[cfg(feature = "listener-mixed")]
+use mihomo_listener::MixedListener;
+use mihomo_listener::SnifferRuntime;
+#[cfg(feature = "listener-tproxy")]
+use mihomo_listener::TProxyListener;
 use mihomo_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
@@ -515,29 +524,46 @@ async fn run(
         let addr: SocketAddr = format!("{}:{}", nl.listen, nl.port).parse()?;
         match nl.listener_type {
             ListenerType::Mixed | ListenerType::Http | ListenerType::Socks5 => {
-                let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
-                    .with_sniffer(sniffer_runtime.clone())
-                    .with_auth(auth.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = listener.run().await {
-                        error!("Listener error: {}", e);
-                    }
-                });
+                #[cfg(feature = "listener-mixed")]
+                {
+                    let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
+                        .with_sniffer(sniffer_runtime.clone())
+                        .with_auth(auth.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = listener.run().await {
+                            error!("Listener error: {}", e);
+                        }
+                    });
+                }
+                #[cfg(not(feature = "listener-mixed"))]
+                tracing::warn!(
+                    "listener '{}': type {:?} requires feature 'listener-mixed'",
+                    nl.name,
+                    nl.listener_type
+                );
             }
             ListenerType::TProxy => {
-                let listener = TProxyListener::new(
-                    tunnel.clone(),
-                    addr,
-                    nl.tproxy_sni,
-                    config.listeners.routing_mark,
-                    nl.name.clone(),
-                )
-                .with_sniffer(sniffer_runtime.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = listener.run().await {
-                        error!("TProxy listener error: {}", e);
-                    }
-                });
+                #[cfg(feature = "listener-tproxy")]
+                {
+                    let listener = TProxyListener::new(
+                        tunnel.clone(),
+                        addr,
+                        nl.tproxy_sni,
+                        config.listeners.routing_mark,
+                        nl.name.clone(),
+                    )
+                    .with_sniffer(sniffer_runtime.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = listener.run().await {
+                            error!("TProxy listener error: {}", e);
+                        }
+                    });
+                }
+                #[cfg(not(feature = "listener-tproxy"))]
+                tracing::warn!(
+                    "listener '{}': TProxy requires feature 'listener-tproxy'",
+                    nl.name
+                );
             }
         }
     }

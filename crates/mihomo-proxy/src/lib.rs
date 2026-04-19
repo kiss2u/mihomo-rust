@@ -3,13 +3,19 @@ pub mod group;
 pub mod health;
 pub mod http_adapter;
 pub mod reject;
-pub mod shadowsocks_adapter;
-pub mod simple_obfs;
 pub mod socks5_adapter;
 pub mod stream_conn;
 pub mod transport_chain;
-pub mod trojan;
+
+#[cfg(feature = "ss")]
+pub mod shadowsocks_adapter;
+#[cfg(feature = "ss")]
+pub mod simple_obfs;
+#[cfg(feature = "ss")]
 pub mod v2ray_plugin;
+
+#[cfg(feature = "trojan")]
+pub mod trojan;
 
 #[cfg(feature = "vless")]
 pub(crate) mod vless;
@@ -24,10 +30,12 @@ pub use group::selector::SelectorGroup;
 pub use group::urltest::UrlTestGroup;
 pub use http_adapter::HttpAdapter;
 pub use reject::RejectAdapter;
+#[cfg(feature = "ss")]
 pub use shadowsocks_adapter::ShadowsocksAdapter;
 pub use socks5_adapter::Socks5Adapter;
 pub use stream_conn::StreamConn;
 pub use transport_chain::TransportChain;
+#[cfg(feature = "trojan")]
 pub use trojan::TrojanAdapter;
 
 #[cfg(feature = "vless")]
