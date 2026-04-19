@@ -3,7 +3,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing_subscriber::Layer;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -24,7 +24,7 @@ impl LogLevel {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LogMessage {
     pub level: LogLevel,
     pub payload: String,
