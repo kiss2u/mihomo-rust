@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use futures::StreamExt;
-use mihomo_api::log_stream::{LogLevel, LogMessage};
+use mihomo_api::log_stream::{LogBroadcastLayer, LogLevel, LogMessage};
 use mihomo_api::routes::{create_router, AppState};
 use mihomo_common::DnsMode;
 use mihomo_config::raw::RawConfig;
@@ -323,5 +323,52 @@ async fn logs_ws_lagged_client_continues() {
     assert!(
         v.get("type").is_some(),
         "post-lag frame must be valid JSON: {text}"
+    );
+}
+
+// ── Registry-path regression (tracing-subscriber layer composition) ──
+//
+// This test exercises the actual bug path: tracing::info!()/debug!() →
+// LogBroadcastLayer.on_event() → log_tx.send(). Without LevelFilter::TRACE
+// on the broadcast layer, the registry's global max-level may be driven to
+// INFO by the fmt layer's EnvFilter, silencing DEBUG before on_event fires.
+
+#[test]
+fn logs_registry_path_delivers_info_and_debug_to_broadcast_layer() {
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
+
+    let (tx, mut rx) = broadcast::channel::<LogMessage>(16);
+    // Mirror the exact layer composition from crates/mihomo-app/src/main.rs,
+    // but with LevelFilter::TRACE on the broadcast layer (the fix).
+    let log_layer = LogBroadcastLayer { tx }.with_filter(LevelFilter::TRACE);
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(log_layer);
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("integration-test-log");
+        tracing::debug!("integration-test-debug");
+    });
+
+    let msg1 = rx
+        .try_recv()
+        .expect("info event must reach broadcast layer");
+    assert_eq!(msg1.level, LogLevel::Info);
+    assert!(
+        msg1.payload.contains("integration-test-log"),
+        "info payload mismatch: {}",
+        msg1.payload
+    );
+
+    let msg2 = rx.try_recv().expect("debug event must reach broadcast layer — without LevelFilter::TRACE on the broadcast layer this fails");
+    assert_eq!(msg2.level, LogLevel::Debug);
+    assert!(
+        msg2.payload.contains("integration-test-debug"),
+        "debug payload mismatch: {}",
+        msg2.payload
     );
 }

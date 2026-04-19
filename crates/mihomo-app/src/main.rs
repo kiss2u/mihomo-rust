@@ -68,15 +68,18 @@ fn main() -> Result<()> {
     }
 
     // Initialize logging + log broadcast channel for GET /logs WebSocket.
-    // The broadcast layer is NOT wrapped in EnvFilter so dashboard clients see
-    // all events regardless of RUST_LOG; per-connection ?level= filtering applies.
+    // The broadcast layer carries LevelFilter::TRACE so the registry's global
+    // max-level is TRACE, preventing the fmt layer's EnvFilter from silencing
+    // DEBUG/TRACE events before LogBroadcastLayer.on_event fires. Per-connection
+    // ?level= filtering in the WS handler provides the client-visible suppression.
     let log_tx = {
         use mihomo_api::log_stream::LogBroadcastLayer;
         use tokio::sync::broadcast;
+        use tracing_subscriber::filter::LevelFilter;
         use tracing_subscriber::prelude::*;
 
         let (tx, _) = broadcast::channel(128);
-        let log_layer = LogBroadcastLayer { tx: tx.clone() };
+        let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer().with_filter(
