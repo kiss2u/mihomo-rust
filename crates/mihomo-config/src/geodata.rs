@@ -163,9 +163,15 @@ mod tests {
             ..raw_defaults()
         };
         let cfg = parse_geodata(Some(&raw)).unwrap();
-        assert_eq!(cfg.mmdb_path.unwrap().to_str().unwrap(), "/custom/Country.mmdb");
+        assert_eq!(
+            cfg.mmdb_path.unwrap().to_str().unwrap(),
+            "/custom/Country.mmdb"
+        );
         assert_eq!(cfg.asn_path.unwrap().to_str().unwrap(), "/custom/ASN.mmdb");
-        assert_eq!(cfg.geosite_path.unwrap().to_str().unwrap(), "/custom/geosite.mrs");
+        assert_eq!(
+            cfg.geosite_path.unwrap().to_str().unwrap(),
+            "/custom/geosite.mrs"
+        );
     }
 
     #[test]
