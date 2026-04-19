@@ -1,4 +1,4 @@
-use crate::match_engine;
+use crate::match_engine::{self, DomainIndex};
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
 use mihomo_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
@@ -13,6 +13,9 @@ use tracing::{debug, info};
 pub struct TunnelInner {
     pub mode: RwLock<TunnelMode>,
     pub rules: RwLock<Vec<Box<dyn Rule>>>,
+    /// Domain trie index for early-exit rule matching (ADR-0008 §7 sub-area 0).
+    /// Rebuilt atomically whenever `update_rules` is called.
+    pub domain_index: RwLock<DomainIndex>,
     pub proxies: RwLock<HashMap<String, Arc<dyn Proxy>>>,
     pub resolver: Arc<Resolver>,
     /// Fallback DIRECT adapter used when no user-defined rule matches or
@@ -77,7 +80,8 @@ impl TunnelInner {
             }
             TunnelMode::Rule => {
                 let rules = self.rules.read();
-                let result = match_engine::match_rules(metadata, &rules);
+                let index = self.domain_index.read();
+                let result = match_engine::match_rules(metadata, &rules, &index);
                 match result {
                     Some(m) => {
                         let action = if m.adapter_name == "DIRECT" {
@@ -126,6 +130,7 @@ impl Tunnel {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
                 rules: RwLock::new(Vec::new()),
+                domain_index: RwLock::new(DomainIndex::empty()),
                 proxies: RwLock::new(HashMap::new()),
                 resolver,
                 direct,
@@ -151,11 +156,12 @@ impl Tunnel {
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
         let needs = rules.iter().any(|r| r.should_resolve_ip());
+        let new_index = DomainIndex::build(&rules);
         {
-            let mut guard = self.inner.rules.write();
-            *guard = rules;
-            // Store under the write lock so any reader that acquires the rules
-            // lock after this point also sees the updated flag.
+            let mut rules_guard = self.inner.rules.write();
+            let mut index_guard = self.inner.domain_index.write();
+            *rules_guard = rules;
+            *index_guard = new_index;
             self.inner
                 .needs_ip_resolution
                 .store(needs, Ordering::Relaxed);
