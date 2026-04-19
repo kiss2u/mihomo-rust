@@ -29,6 +29,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Doc check
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
   test:
     runs-on: ubuntu-latest
     needs: lint
@@ -163,6 +166,33 @@ jobs:
           cargo check -p mihomo-dns --no-default-features --features encrypted
           # D3: default features (= encrypted on)
           cargo check -p mihomo-dns
+
+  features:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: features
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+
+      - name: Feature powerset — mihomo-transport
+        # boring-tls excluded: requires C++ toolchain at build time; tested via
+        # --all-features in the transport feature matrix step in the test job.
+        run: cargo hack check -p mihomo-transport --feature-powerset --exclude-features boring-tls
+
+      - name: Feature powerset — mihomo-proxy
+        run: cargo hack check -p mihomo-proxy --feature-powerset
+
+      - name: Feature powerset — mihomo-listener
+        run: cargo hack check -p mihomo-listener --feature-powerset
 
   msrv:
     runs-on: ubuntu-latest

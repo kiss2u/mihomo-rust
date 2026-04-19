@@ -154,6 +154,22 @@ pub fn discover_and_load() -> Option<Arc<GeositeDB>> {
     discover_and_load_from(&default_geosite_candidates())
 }
 
+/// Load geosite DB from `explicit` path if given (skips discovery chain),
+/// otherwise fall through to `candidates`. Used by the `geodata.geosite-path`
+/// override. If `explicit` is set but the file is absent, returns `None` and
+/// warns — same as any absent geosite DB; the auto-update task may download
+/// it before the first GEOSITE rule fires.
+pub fn discover_and_load_at(
+    explicit: Option<&std::path::Path>,
+    candidates: &[PathBuf],
+) -> Option<Arc<GeositeDB>> {
+    if let Some(p) = explicit {
+        // Explicit path given: use only that path (no fallback to discovery).
+        return discover_and_load_from(&[p.to_path_buf()]);
+    }
+    discover_and_load_from(candidates)
+}
+
 /// Same as [`discover_and_load`] but lets callers override the candidate
 /// list. Used by tests and by an explicit config override in future
 /// M2+ `geodata.path` support.

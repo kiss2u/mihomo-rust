@@ -1,6 +1,43 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// `geodata:` YAML subsection — path overrides, download URLs, auto-update.
+///
+/// Fields `geodata-mode`, `geodata-loader`, and `geoip-matcher` exist in
+/// upstream Go mihomo but are not meaningful here. They are accepted and
+/// produce a `warn!` (Class B per ADR-0002, forward-compat).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawGeoDataConfig {
+    /// Explicit path to GeoIP Country MMDB. Skips discovery chain when set.
+    pub mmdb_path: Option<String>,
+    /// Explicit path to GeoLite2-ASN MMDB. Skips discovery chain when set.
+    pub asn_path: Option<String>,
+    /// Explicit path to geosite `.mrs` file. Skips discovery chain when set.
+    pub geosite_path: Option<String>,
+    /// If true, spawn a background task that periodically re-downloads DBs.
+    #[serde(default)]
+    pub auto_update: bool,
+    /// Hours between update checks. Minimum 1 (sub-hour polling hammers CDN
+    /// rate limits). Hard parse error on 0.
+    pub auto_update_interval: Option<u32>,
+    /// Download URL overrides. Defaults baked in when absent.
+    pub url: Option<RawGeoDataUrls>,
+    // Upstream-only fields accepted for forward-compat; we warn-once and ignore.
+    pub geodata_mode: Option<serde_yaml::Value>,
+    pub geodata_loader: Option<serde_yaml::Value>,
+    pub geoip_matcher: Option<serde_yaml::Value>,
+}
+
+/// `geodata.url.*` — download URL overrides.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawGeoDataUrls {
+    pub mmdb: Option<String>,
+    pub asn: Option<String>,
+    pub geosite: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
@@ -37,6 +74,7 @@ pub struct RawConfig {
     pub listeners: Option<Vec<RawListener>>,
     pub authentication: Option<Vec<String>>,
     pub skip_auth_prefixes: Option<Vec<String>>,
+    pub geodata: Option<RawGeoDataConfig>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.

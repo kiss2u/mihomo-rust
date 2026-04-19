@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod dns_parser;
+pub mod geodata;
 pub mod proxy_parser;
 pub mod proxy_provider;
 pub mod raw;
@@ -7,6 +8,8 @@ pub mod rule_parser;
 pub mod rule_provider;
 pub mod sub_rules_parser;
 pub mod subscription;
+
+pub use geodata::GeoDataConfig;
 
 use mihomo_common::AuthConfig;
 use mihomo_common::{Proxy, Rule, SnifferConfig, TunnelMode};
@@ -31,6 +34,7 @@ pub struct Config {
     pub sniffer: SnifferConfig,
     pub auth: Arc<AuthConfig>,
     pub raw: raw::RawConfig,
+    pub geodata: GeoDataConfig,
 }
 
 pub struct GeneralConfig {
@@ -241,9 +245,9 @@ fn rebuild_from_raw_impl(
     }
 
     // Build the parser context: lazy-load the GeoIP MMDB iff any rule
-    // (top-level) references GEOIP. Classical rule-providers with nested
-    // GEOIP rules benefit from the same shared reader when one is loaded.
-    let ctx = build_parser_context(raw)?;
+    // (top-level) references GEOIP. Respects any `geodata:` path overrides
+    // already embedded in the raw config.
+    let ctx = build_parser_context_from_raw(raw)?;
 
     // Load rule-providers before rule parsing so RULE-SET entries can
     // resolve their named sets.
@@ -387,24 +391,39 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
 /// at least one GEOSITE rule is present (same lazy pattern as GeoIP/ASN).
 /// Unlike GeoIP/ASN, the GEOSITE DB is tolerated as absent — per spec the
 /// rule no-matches at query time rather than failing at parse.
-fn build_parser_context(
+/// Parse geodata paths from `raw.geodata` and build a `ParserContext` that
+/// respects any explicit path overrides. Used by both `build_config` and
+/// `rebuild_from_raw_impl` so all code paths honour the same config.
+fn build_parser_context_from_raw(
     raw: &raw::RawConfig,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
+    let geo = geodata::parse_geodata(raw.geodata.as_ref())?;
+    build_parser_context_with_geo(raw, &geo)
+}
+
+fn build_parser_context_with_geo(
+    raw: &raw::RawConfig,
+    geo: &GeoDataConfig,
+) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
+    let geoip_path = geo.mmdb_path.clone().unwrap_or_else(default_geoip_path);
+    let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
     build_parser_context_at(
         raw,
-        default_geoip_path(),
-        default_asn_path(),
+        geoip_path,
+        asn_path,
         mihomo_rules::geosite::default_geosite_candidates(),
+        geo.geosite_path.as_deref(),
     )
 }
 
 /// Same as [`build_parser_context`] but lets the caller override the mmdb
-/// paths — used by tests to avoid depending on the user's `$HOME`.
+/// paths — used by tests and by the M2 `geodata:` config path overrides.
 fn build_parser_context_at(
     raw: &raw::RawConfig,
     geoip_path: PathBuf,
     asn_path: PathBuf,
     geosite_candidates: Vec<PathBuf>,
+    geosite_explicit: Option<&Path>,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
     let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
 
@@ -422,7 +441,7 @@ fn build_parser_context_at(
 
     let geosite_trigger = lines.iter().any(|l| line_is_geosite_rule(l));
     let geosite = if geosite_trigger {
-        mihomo_rules::geosite::discover_and_load_from(&geosite_candidates)
+        mihomo_rules::geosite::discover_and_load_at(geosite_explicit, &geosite_candidates)
     } else {
         None
     };
@@ -498,17 +517,22 @@ fn line_is_asn_rule(line: &str) -> bool {
 
 /// Default path for the GeoIP Country MMDB, matching upstream mihomo.
 /// Honours `$XDG_CONFIG_HOME` if set, otherwise `$HOME/.config/mihomo`.
-fn default_geoip_path() -> PathBuf {
+pub fn default_geoip_path() -> PathBuf {
     mihomo_config_dir().join("Country.mmdb")
 }
 
 /// Default path for the GeoLite2-ASN MMDB. Same discovery chain as GeoIP,
 /// with the upstream-compatible filename `GeoLite2-ASN.mmdb`.
-fn default_asn_path() -> PathBuf {
+pub fn default_asn_path() -> PathBuf {
     mihomo_config_dir().join("GeoLite2-ASN.mmdb")
 }
 
-fn mihomo_config_dir() -> PathBuf {
+/// Default path for geosite.mrs (first candidate in the discovery chain).
+pub fn default_geosite_path() -> PathBuf {
+    mihomo_config_dir().join("geosite.mrs")
+}
+
+pub fn mihomo_config_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -616,6 +640,10 @@ async fn build_config(
     raw: raw::RawConfig,
     cache_dir: Option<&Path>,
 ) -> Result<Config, anyhow::Error> {
+    // Geodata config — parse and validate early so path errors surface before
+    // anything tries to load the DBs.
+    let geodata = geodata::parse_geodata(raw.geodata.as_ref())?;
+
     // General config
     let mode = raw
         .mode
@@ -637,8 +665,9 @@ async fn build_config(
         bind_address,
     };
 
-    // DNS
-    let dns_config = dns_parser::parse_dns(&raw).await?;
+    // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
+    // same path as the rule engine.
+    let dns_config = dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref()).await?;
 
     // Load proxy providers (async: may HTTP-fetch provider files).
     let proxy_providers = if let Some(raw_pp) = raw.proxy_providers.as_ref() {
@@ -653,6 +682,7 @@ async fn build_config(
 
     // Proxies and rules via rebuild — pass the resolver so DIRECT can avoid
     // the OS resolver (and the resulting DNS-loop when mihomo is system DNS).
+    // Uses geodata paths from the raw config (already validated above).
     let (proxies, rules) = rebuild_from_raw_impl(
         &raw,
         cache_dir,
@@ -660,8 +690,9 @@ async fn build_config(
         &proxy_providers,
     )?;
 
-    // Rule providers are loaded separately so they can be shared with the API.
-    let ctx = build_parser_context(&raw)?;
+    // Rule providers share the same ParserContext as the top-level rules
+    // (same geodata paths, same lazy-loaded readers).
+    let ctx = build_parser_context_with_geo(&raw, &geodata)?;
     let rule_providers = match raw.rule_providers.as_ref() {
         Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir, &ctx),
         _ => HashMap::new(),
@@ -728,6 +759,7 @@ async fn build_config(
         sniffer,
         auth,
         raw,
+        geodata,
     })
 }
 
@@ -769,9 +801,14 @@ mod geoip_context_tests {
         ]);
         // Point at a path guaranteed not to exist — should be ignored.
         let nonexistent = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
-        let ctx =
-            build_parser_context_at(&raw, nonexistent, nonexistent_asn(), nonexistent_geosite())
-                .unwrap();
+        let ctx = build_parser_context_at(
+            &raw,
+            nonexistent,
+            nonexistent_asn(),
+            nonexistent_geosite(),
+            None,
+        )
+        .unwrap();
         assert!(ctx.geoip.is_none());
         assert!(ctx.asn.is_none());
     }
@@ -785,6 +822,7 @@ mod geoip_context_tests {
             nonexistent.clone(),
             nonexistent_asn(),
             nonexistent_geosite(),
+            None,
         )
         .expect_err("must fail-fast when mmdb is missing");
         let msg = format!("{}", err);
@@ -810,6 +848,7 @@ mod geoip_context_tests {
             tmp.path().to_path_buf(),
             nonexistent_asn(),
             nonexistent_geosite(),
+            None,
         )
         .expect_err("garbage bytes must fail to parse as mmdb");
         let msg = format!("{}", err);
@@ -841,6 +880,7 @@ mod geoip_context_tests {
             nonexistent_geoip,
             nonexistent_asn(),
             nonexistent_geosite(),
+            None,
         )
         .unwrap();
         assert!(ctx.asn.is_none());
@@ -851,9 +891,14 @@ mod geoip_context_tests {
         let raw = raw_with_rules(vec!["IP-ASN,13335,PROXY"]);
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let asn = PathBuf::from("/nonexistent-test-path-asn/GeoLite2-ASN.mmdb");
-        let err =
-            build_parser_context_at(&raw, nonexistent_geoip, asn.clone(), nonexistent_geosite())
-                .expect_err("must fail-fast when ASN mmdb is missing");
+        let err = build_parser_context_at(
+            &raw,
+            nonexistent_geoip,
+            asn.clone(),
+            nonexistent_geosite(),
+            None,
+        )
+        .expect_err("must fail-fast when ASN mmdb is missing");
         let msg = format!("{}", err);
         assert!(
             msg.contains(&asn.display().to_string()),
