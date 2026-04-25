@@ -1,14 +1,13 @@
 # ECH + uTLS Fingerprint Initiative — Status
 
-**Branch:** `feat/tls-ech-utls` @ `d31bf79`  
-**Last updated:** 2026-04-12  
+**Last updated:** 2026-04-25 — DNS-sourced ECH and ECH retry self-heal landed.
 **Docs:** [design](ech-utls-design.md) · [test plan](ech-utls-test-plan.md)
 
 ---
 
 ## Summary
 
-Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are implemented in mihomo-rust's TLS transport via a new `boring-tls` cargo feature backed by BoringSSL (boring 5.0.2 + tokio-boring 5.0.0). Six fingerprint profiles ship in v1, inline-config ECH works end-to-end, and all C1–C15 tests pass against a real loopback BoringSSL server with a live ECH keypair. The branch is ready for integration review before merging to main.
+Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are implemented in mihomo-rust's TLS transport via a new `boring-tls` cargo feature backed by BoringSSL (boring 5.0.2 + tokio-boring 5.0.0). Six fingerprint profiles ship, inline-config and DNS-sourced ECH both work end-to-end, ECH key rotation self-heals on `ech_required` rejection, and all C1–C16 tests pass against a real loopback BoringSSL server with a live ECH keypair.
 
 ---
 
@@ -26,12 +25,15 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 - JA3 hash reference consts for firefox, android, edge (hardcoded; chrome uses property-based assertions; safari and ios alias at the wire level, see Key Decisions)
 - Feature-gated test suite: `boring_tls_test` (20 cases including real C13–C15), plus retained rustls suite (11 cases); 31 total passing
 
-### Deferred / out of scope
+### Added since v1
+
+- **DNS-sourced ECH** (`ech-opts.enable: true` with no inline `config:`) — async pre-resolution pass over the proxy YAML map (`mihomo_config::ech_dns::preresolve_ech`) uses `hickory-resolver` against the system DNS config to fetch the wire-format `ECHConfigList` from the HTTPS (RR 65) record, then writes it back as base64 so the sync `parse_proxy` path stays sync. Wired into `build_config`, the API config-reload handlers, the proxy-provider refresh, and the subscription auto-update path.
+- **ECH retry self-heal** — when the server returns `ech_required` with fresh `retry_configs`, `BoringInner` (now holding `ech: Mutex<Option<EchOpts>>`) rotates its stored ECH bytes to the server-signed key. The current connect still fails (the inner stream is consumed by `tokio_boring::connect`), but every subsequent connect through the same `TlsLayer` uses the refreshed key. Validated end-to-end by `c16_ech_self_heal_uses_retry_configs_on_next_connect`.
+
+### Still deferred / out of scope
 
 | Item | Reason |
 |------|--------|
-| DNS-sourced ECH (`ech-opts.enable` without `ech-opts.config`) | Requires SVCB/HTTPS record support in `mihomo-dns` |
-| ECH retry-on-rejection (automatic client retry with server-supplied config) | Needs per-connection `SslConnector` rebuild; complex async flow. C15 currently asserts rejection surfaces as `TransportError::Tls` with no automatic retry. |
 | `randomized` fingerprint profile | Requires per-connection extension-list sampling |
 | Deprecated fingerprints (`chrome_psk`, `chrome_pq`, `chrome_padding_psk_shuffle`, etc.) | Actively discouraged upstream; stub-warn only |
 | `360`, `qq` fingerprints | Low demand; deferred |
@@ -53,6 +55,8 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 | #14 | Fix C2 assertion — exact distinctness + safari/ios alias | qa | completed | `a505485` |
 | #15 | Implement `spawn_ech_server()` FFI wiring | dev | completed | `d31bf79` |
 | #16 | Re-wire C13–C15 as real end-to-end ECH tests | dev | completed | `d31bf79` |
+| #17 | DNS-sourced ECH via hickory-resolver (preresolve pass) | dev | completed | (this branch) |
+| #18 | ECH self-heal — store retry_configs on rejection (C16) | dev | completed | (this branch) |
 
 ---
 
@@ -62,8 +66,8 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 |----------|-------------|----------------------|
 | TLS backend for ECH/uTLS | **Option A:** boring + tokio-boring | Option B (rustls extensions), Option C (FFI-only boring) |
 | Feature gating | `boring-tls` cargo feature; off by default | Always-on (rejected: C toolchain requirement breaks CI workers without cmake/clang) |
-| DNS-sourced ECH | Parse error in v1 (`ech-opts.enable` alone) | Silent ignore (rejected: too easy to misconfigure) |
-| ECH rejection behavior | Connection fails with `TransportError::Tls` — no silent fallback | Auto-fallback to plaintext SNI (rejected: defeats purpose of ECH) |
+| DNS-sourced ECH | Async preprocessing pass injects fetched bytes back into YAML before sync parse — keeps `parse_proxy` sync. | (a) Make `parse_proxy` async (cascades to ~10 call sites and many `#[test]`s); (b) Block on a temp runtime inside the sync parser (panics inside an outer tokio runtime). |
+| ECH rejection behavior | Self-heal: rotate stored ECH bytes to the server's `retry_configs`, surface this connect's failure, future connects use the new key. | (a) Auto-fallback to plaintext SNI (rejected: defeats purpose of ECH); (b) In-call retry on a fresh TCP (rejected: TLS Layer doesn't own the dialer). |
 | GREASE handling in JA3 | Strip GREASE values per Salesforce canonical spec before hashing | Include GREASE (would make chrome hash non-deterministic) |
 | chrome JA3 assertion style | Property-based (cipher order + GREASE presence) — no fixed hash | Fixed hash (rejected: extension permutation makes chrome hash non-deterministic per-handshake) |
 | `random` profile resolution | Resolved once at `TlsLayer::new` time (not per-connection) | Per-connection pick (deferred to design §5; divergence from Go upstream) |
@@ -76,7 +80,7 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 - **Boring cipher/sigalg string fidelity is a silent-drift risk.** The OpenSSL cipher strings in `apply_fingerprint()` are translated from Go `u_parrots.go` by hand. A wrong cipher name silently falls through without error; the only detection is JA3 hash mismatch. The hardcoded reference hashes in C2 guard against drift — a future profile translation bug will fail the exact-equality assertion loudly rather than pass silently.
 - **Binary size increase.** Enabling `boring-tls` adds approximately 8–12 MB to the release binary (BoringSSL static lib via boring-sys cmake).
 - **`android` and `edge` not in the `random` weighted set.** This matches design doc §5 intentionally, but is not obvious to operators who may expect all v1 profiles to be reachable via `random`.
-- **No automatic ECH retry on rejection.** If the client's ECH config is stale, the server's retry configs are surfaced in the `TransportError::Tls` error but the connection does not automatically rebuild and retry. Operators must refresh the ECH config out of band. See Deferred table.
+- **The first connect after an ECH key rotation still fails.** When the server returns `ech_required` with fresh `retry_configs`, the kernel updates its in-memory ECH config but cannot re-handshake on the consumed inner stream. Subsequent connects auto-use the new key. Operators do not need to do anything; the second connect (driven by URLTest, retry, or the next user request) succeeds. C16 covers this end to end.
 
 ---
 

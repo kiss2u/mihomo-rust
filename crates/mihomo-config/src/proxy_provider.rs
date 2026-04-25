@@ -147,7 +147,7 @@ impl ProxyProvider {
         }
     }
 
-    fn parse_proxies(&self, content: &str) -> Vec<Arc<dyn Proxy>> {
+    async fn parse_proxies(&self, content: &str) -> Vec<Arc<dyn Proxy>> {
         let doc: serde_yaml::Value = match serde_yaml::from_str(content) {
             Ok(v) => v,
             Err(e) => {
@@ -159,7 +159,7 @@ impl ProxyProvider {
         // Accept both `proxies: [...]` wrapper and a bare list.
         let list_val = doc.get("proxies").cloned().unwrap_or_else(|| doc.clone());
 
-        let proxy_maps: Vec<HashMap<String, serde_yaml::Value>> = match serde_yaml::from_value(
+        let mut proxy_maps: Vec<HashMap<String, serde_yaml::Value>> = match serde_yaml::from_value(
             list_val,
         ) {
             Ok(v) => v,
@@ -168,6 +168,10 @@ impl ProxyProvider {
                 return Vec::new();
             }
         };
+
+        // Pre-resolve any DNS-sourced ECH configs into inline base64 — keeps
+        // `parse_proxy` itself sync.
+        crate::ech_dns::preresolve_ech(&mut proxy_maps).await;
 
         let mut result = Vec::new();
         for raw_map in &proxy_maps {
@@ -207,7 +211,7 @@ impl ProxyProvider {
     pub async fn refresh(&self) {
         match self.fetch_content().await {
             Ok(content) => {
-                let proxies = self.parse_proxies(&content);
+                let proxies = self.parse_proxies(&content).await;
                 info!(provider = %self.name, count = proxies.len(), "proxy-provider refreshed");
                 *self.slot.write() = proxies;
             }

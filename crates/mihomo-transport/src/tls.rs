@@ -661,8 +661,14 @@ fn resolve_fingerprint(fp: &str) -> Option<&'static FingerprintParams> {
 struct BoringInner {
     connector: boring::ssl::SslConnector,
     server_name: String,
-    /// Stored for per-connection ECH wiring (task #9).
-    ech: Option<EchOpts>,
+    /// Per-connection ECH config (task #9). Wrapped in a `Mutex` so the
+    /// connect path can transparently rotate to server-supplied
+    /// `retry_configs` after an ECH-rejection (task: ECH self-healing).
+    /// The current connect attempt still fails — the inner stream has
+    /// already been consumed by `tokio_boring::connect` — but every
+    /// subsequent connect uses the refreshed key, recovering the proxy
+    /// without operator intervention.
+    ech: std::sync::Mutex<Option<EchOpts>>,
 }
 
 #[cfg(feature = "boring-tls")]
@@ -772,7 +778,7 @@ impl BoringInner {
         Ok(Self {
             connector,
             server_name,
-            ech: config.ech.clone(),
+            ech: std::sync::Mutex::new(config.ech.clone()),
         })
     }
 
@@ -785,8 +791,13 @@ impl BoringInner {
         // SNI
         cfg.set_use_server_name_indication(true);
 
+        // Snapshot the current ECH config before consuming `inner`. The lock
+        // is held only across this snapshot — never across the await.
+        let ech_snapshot = self.ech.lock().expect("ech mutex poisoned").clone();
+        let ech_requested = ech_snapshot.is_some();
+
         // ECH inline path — per-connection setup on ConnectConfiguration.
-        if let Some(EchOpts::Config(ech_bytes)) = &self.ech {
+        if let Some(EchOpts::Config(ech_bytes)) = &ech_snapshot {
             cfg.set_ech_config_list(ech_bytes).map_err(|e| {
                 TransportError::Config(format!("boring: set_ech_config_list: {}", e))
             })?;
@@ -805,7 +816,7 @@ impl BoringInner {
                 let version = tls_stream.ssl().version_str();
                 tracing::info!(
                     sni = %self.server_name,
-                    ech_requested = self.ech.is_some(),
+                    ech_requested = ech_requested,
                     ech_accepted = ech_accepted,
                     tls_version = %version,
                     "boring TLS handshake complete"
@@ -813,18 +824,29 @@ impl BoringInner {
                 Ok(Box::new(tls_stream))
             }
             Err(e) => {
-                // If ECH was active and the server rejected it, include the
-                // ECH retry configs from the server's ech_required alert so
-                // the caller can retry with updated ECH keys.
-                // No automatic retry in v1 — rejection is an error per QA C14.
-                if self.ech.is_some() {
+                // If ECH was active and the server rejected with `ech_required`,
+                // BoringSSL surfaces the new `retry_configs` blob the server
+                // signed. Self-heal: store the new bytes so the *next*
+                // `connect()` uses them. The current attempt still fails — the
+                // inner stream is already consumed by `tokio_boring::connect`,
+                // so we cannot re-dial here.
+                if ech_requested {
                     if let Some(retry_configs) = e.ssl().and_then(|ssl| ssl.get_ech_retry_configs())
                     {
                         if !retry_configs.is_empty() {
-                            let hex = retry_configs
+                            let new_bytes = retry_configs.to_vec();
+                            let hex = new_bytes
                                 .iter()
                                 .map(|b| format!("{:02x}", b))
                                 .collect::<String>();
+                            *self.ech.lock().expect("ech mutex poisoned") =
+                                Some(EchOpts::Config(new_bytes));
+                            tracing::warn!(
+                                sni = %self.server_name,
+                                retry_configs = %hex,
+                                "ECH rejected by server; rotated to retry_configs — \
+                                 next connect will use the new key"
+                            );
                             return Err(TransportError::Tls(format!(
                                 "boring TLS handshake (ECH rejected; retry_configs={}): {}",
                                 hex, e

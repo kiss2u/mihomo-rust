@@ -1140,3 +1140,91 @@ pub async fn spawn_ech_server(
 
     (addr, rx)
 }
+
+/// Multi-accept variant of [`spawn_ech_server`].
+///
+/// Accepts up to `count` connections, sending one [`BoringConnInfo`] per
+/// connection through the returned `mpsc` receiver. Used by the ECH
+/// self-heal test (C16) which drives two connects through the same server
+/// to validate retry-config rotation.
+#[cfg(feature = "boring-tls")]
+pub async fn spawn_ech_server_multi(
+    opts: BoringServerOptions,
+    count: usize,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::mpsc::Receiver<BoringConnInfo>,
+) {
+    let ech_cfg = opts
+        .ech_config
+        .expect("spawn_ech_server_multi: ech_config must be present");
+
+    let (tx, rx) = tokio::sync::mpsc::channel(count.max(1));
+
+    let cert = rustls_cert_to_boring(&opts.cert_der).expect("boring ECH multi: cert");
+    let key = rustls_key_to_boring(&opts.key_der).expect("boring ECH multi: key");
+
+    let mut builder =
+        boring::ssl::SslAcceptor::mozilla_intermediate_v5(boring::ssl::SslMethod::tls())
+            .expect("boring ECH multi: SslAcceptor::mozilla_intermediate_v5");
+    builder
+        .set_certificate(&cert)
+        .expect("boring ECH multi: set_certificate");
+    builder
+        .set_private_key(&key)
+        .expect("boring ECH multi: set_private_key");
+
+    unsafe {
+        let ret = boring_sys::SSL_CTX_set1_ech_keys(builder.as_ptr(), ech_cfg.keys_handle.0);
+        assert_eq!(ret, 1, "SSL_CTX_set1_ech_keys failed");
+    }
+
+    let acceptor = builder.build();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("ech multi loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        for _ in 0..count {
+            let (tcp, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let acceptor = acceptor.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("boring ECH multi accept error: {e}");
+                        let _ = tx.send(BoringConnInfo::default()).await;
+                        return;
+                    }
+                };
+                let ech_accepted = stream.ssl().ech_accepted();
+                let info = BoringConnInfo {
+                    server_name: stream
+                        .ssl()
+                        .servername(boring::ssl::NameType::HOST_NAME)
+                        .map(|s| s.to_string()),
+                    alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+                    client_hello_bytes: vec![],
+                    peer_certs: vec![],
+                    ech_accepted,
+                };
+                let _ = tx.send(info).await;
+                let mut drain = [0u8; 256];
+                loop {
+                    match tokio::io::AsyncReadExt::read(&mut stream, &mut drain).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+
+    (addr, rx)
+}

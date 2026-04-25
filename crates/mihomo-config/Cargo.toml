@@ -34,6 +34,8 @@ base64 = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
 subtle = { workspace = true }
+hickory-resolver = { workspace = true }
+hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

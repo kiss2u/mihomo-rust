@@ -1034,3 +1034,75 @@ async fn c15_ech_retry_config_on_mismatch() {
         err_str
     );
 }
+
+// ─── C16: ECH self-heal — retry_configs are stored, next connect succeeds ───
+//
+// Cloudflare-style ECH key rotation: the client's stored ECHConfigList goes
+// stale, the server signs a fresh `retry_configs` blob, and the kernel must
+// pick up the new key without operator intervention.
+//
+// We can't auto-retry inside a single `connect()` because `tokio_boring::connect`
+// consumes the inner stream, but we *do* persist the new key on `BoringInner.ech`
+// (under a Mutex) so every subsequent connect through the same `TlsLayer` uses
+// the refreshed config.  This test drives that:
+//
+//   1. Server is configured with keypair A.
+//   2. First `connect()` uses (wrong) keypair B → server rejects with
+//      retry_configs containing A.  Layer self-heals: stored ECH now == A.
+//   3. Fresh TCP, second `connect()` on the *same* `TlsLayer` → handshake
+//      now uses A → succeeds with `ech_accepted == true`.
+#[tokio::test]
+async fn c16_ech_self_heal_uses_retry_configs_on_next_connect() {
+    install_crypto_provider();
+
+    let (server_config_list, server_keys) =
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair A (server)");
+    let (client_config_list, _client_keys) =
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair B (client)");
+    let (cert_der, key_der, _, _) = gen_cert(&["loopback.test"]);
+
+    let (addr, _conn_rx) = support::loopback::spawn_ech_server_multi(
+        support::loopback::BoringServerOptions {
+            cert_der,
+            key_der,
+            server_alpn: vec![],
+            require_client_cert_ca: None,
+            ech_config: Some(support::loopback::BoringEchConfig {
+                config_list_bytes: server_config_list,
+                keys_handle: server_keys,
+            }),
+        },
+        2,
+    )
+    .await;
+
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        sni: Some("loopback.test".into()),
+        ech: Some(EchOpts::Config(client_config_list)),
+        ..TlsConfig::new("loopback.test")
+    };
+    let layer = TlsLayer::new(&config).expect("TlsLayer::new");
+
+    // Attempt 1 — should fail with retry_configs surfaced.
+    let tcp1 = tokio::net::TcpStream::connect(addr).await.expect("TCP 1");
+    let r1 = layer.connect(Box::new(tcp1)).await;
+    assert!(r1.is_err(), "first connect must reject (wrong ECH key)");
+    let err1 = r1.err().unwrap().to_string();
+    assert!(
+        err1.contains("retry_configs"),
+        "first connect must surface retry_configs (server signed real key); got: {}",
+        err1
+    );
+
+    // Attempt 2 — fresh TCP, same TlsLayer.  Self-heal should have rotated
+    // the stored ECH bytes to the server's real key, so this handshake
+    // succeeds with ech_accepted = true.
+    let tcp2 = tokio::net::TcpStream::connect(addr).await.expect("TCP 2");
+    let r2 = layer.connect(Box::new(tcp2)).await;
+    assert!(
+        r2.is_ok(),
+        "second connect must succeed after self-heal; err={:?}",
+        r2.err().map(|e| e.to_string())
+    );
+}

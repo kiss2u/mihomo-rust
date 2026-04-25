@@ -607,11 +607,16 @@ async fn subscription_refresh_loop(
         for (name, url) in subs_to_refresh {
             info!("Auto-refreshing subscription '{}'", name);
             match mihomo_config::subscription::fetch_subscription(&url).await {
-                Ok(fetched) => {
+                Ok(mut fetched) => {
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
+
+                    // Pre-resolve any DNS-sourced ECH configs before taking the
+                    // sync write lock — preresolve_ech is async, must not be
+                    // held across `parking_lot::RwLock`.
+                    mihomo_config::ech_dns::preresolve_ech(&mut fetched.proxies).await;
 
                     let mut raw = raw_config.write();
 

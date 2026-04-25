@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod dns_parser;
+pub mod ech_dns;
 pub mod geodata;
 pub mod proxy_parser;
 pub mod proxy_provider;
@@ -637,9 +638,16 @@ fn build_named_listeners(
 }
 
 async fn build_config(
-    raw: raw::RawConfig,
+    mut raw: raw::RawConfig,
     cache_dir: Option<&Path>,
 ) -> Result<Config, anyhow::Error> {
+    // Pre-resolve any DNS-sourced ECH configs into inline base64 so the
+    // sync `parse_proxy` path that follows can stay sync. Failures warn
+    // and leave the map unchanged.
+    if let Some(ps) = raw.proxies.as_mut() {
+        ech_dns::preresolve_ech(ps).await;
+    }
+
     // Geodata config — parse and validate early so path errors surface before
     // anything tries to load the DBs.
     let geodata = geodata::parse_geodata(raw.geodata.as_ref())?;

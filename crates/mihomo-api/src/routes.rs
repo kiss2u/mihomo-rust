@@ -509,9 +509,19 @@ async fn save_config(
 
 // ── Helper: rebuild proxies/rules from raw and apply to tunnel ───────
 
-fn apply_raw_to_tunnel(raw: &RawConfig, tunnel: &Tunnel) -> Result<(), (StatusCode, String)> {
+/// Pre-resolve DNS-sourced ECH then rebuild proxies/rules from `raw` and
+/// apply to the live tunnel. Takes the config *by value* so callers
+/// clone-and-drop their `parking_lot` guard before awaiting — those guards
+/// are not Send and would otherwise break the axum Handler bound.
+async fn apply_raw_to_tunnel(
+    mut raw: RawConfig,
+    tunnel: &Tunnel,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(ps) = raw.proxies.as_mut() {
+        mihomo_config::ech_dns::preresolve_ech(ps).await;
+    }
     let (proxies, rules) =
-        mihomo_config::rebuild_from_raw_with_resolver(raw, Some(tunnel.resolver().clone()))
+        mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(tunnel.resolver().clone()))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
@@ -570,37 +580,41 @@ async fn add_subscription(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let mut raw = state.raw_config.write();
-
-    if let Some(ref subs) = raw.subscriptions {
-        if subs.iter().any(|s| s.name == body.name) {
-            return Err((
-                StatusCode::CONFLICT,
-                "subscription name already exists".into(),
-            ));
-        }
-    }
-
-    let sub = RawSubscription {
-        name: body.name.clone(),
-        url: body.url.clone(),
-        interval: body.interval,
-        last_updated: Some(now),
-    };
-    raw.subscriptions.get_or_insert_with(Vec::new).push(sub);
-
-    // Replace proxies, groups, and rules with remote data as-is
     let pc = fetched.proxies.len();
     let gc = fetched.proxy_groups.len();
     let rc = fetched.rules.len();
-    raw.proxies = Some(fetched.proxies);
-    raw.proxy_groups = Some(fetched.proxy_groups);
-    raw.rules = Some(fetched.rules);
 
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+
+        if let Some(ref subs) = raw.subscriptions {
+            if subs.iter().any(|s| s.name == body.name) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "subscription name already exists".into(),
+                ));
+            }
+        }
+
+        let sub = RawSubscription {
+            name: body.name.clone(),
+            url: body.url.clone(),
+            interval: body.interval,
+            last_updated: Some(now),
+        };
+        raw.subscriptions.get_or_insert_with(Vec::new).push(sub);
+
+        // Replace proxies, groups, and rules with remote data as-is
+        raw.proxies = Some(fetched.proxies);
+        raw.proxy_groups = Some(fetched.proxy_groups);
+        raw.rules = Some(fetched.rules);
+
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
 
     // Auto-save so subscription data is cached on disk
-    let _ = mihomo_config::save_raw_config(&state.config_path, &raw);
+    let _ = mihomo_config::save_raw_config(&state.config_path, &state.raw_config.read());
 
     Ok(Json(serde_json::json!({
         "message": "subscription added",
@@ -612,25 +626,28 @@ async fn delete_subscription(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
+    let snapshot = {
+        let mut raw = state.raw_config.write();
 
-    if let Some(ref mut subs) = raw.subscriptions {
-        let before = subs.len();
-        subs.retain(|s| s.name != name);
-        if subs.len() == before {
-            return Err((StatusCode::NOT_FOUND, "subscription not found".into()));
+        if let Some(ref mut subs) = raw.subscriptions {
+            let before = subs.len();
+            subs.retain(|s| s.name != name);
+            if subs.len() == before {
+                return Err((StatusCode::NOT_FOUND, "subscription not found".into()));
+            }
+        } else {
+            return Err((StatusCode::NOT_FOUND, "no subscriptions".into()));
         }
-    } else {
-        return Err((StatusCode::NOT_FOUND, "no subscriptions".into()));
-    }
 
-    // Clear everything from the remote subscription
-    raw.proxies = Some(Vec::new());
-    raw.proxy_groups = Some(Vec::new());
-    raw.rules = Some(Vec::new());
+        // Clear everything from the remote subscription
+        raw.proxies = Some(Vec::new());
+        raw.proxy_groups = Some(Vec::new());
+        raw.rules = Some(Vec::new());
 
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
-    let _ = mihomo_config::save_raw_config(&state.config_path, &raw);
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    let _ = mihomo_config::save_raw_config(&state.config_path, &state.raw_config.read());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -656,25 +673,29 @@ async fn refresh_subscription(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let mut raw = state.raw_config.write();
-
-    if let Some(ref mut subs) = raw.subscriptions {
-        if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
-            sub.last_updated = Some(now);
-        }
-    }
-
     let pc = fetched.proxies.len();
     let gc = fetched.proxy_groups.len();
     let rc = fetched.rules.len();
-    raw.proxies = Some(fetched.proxies);
-    raw.proxy_groups = Some(fetched.proxy_groups);
-    raw.rules = Some(fetched.rules);
 
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+
+        if let Some(ref mut subs) = raw.subscriptions {
+            if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
+                sub.last_updated = Some(now);
+            }
+        }
+
+        raw.proxies = Some(fetched.proxies);
+        raw.proxy_groups = Some(fetched.proxy_groups);
+        raw.rules = Some(fetched.rules);
+
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
 
     // Auto-save so subscription data is cached on disk
-    let _ = mihomo_config::save_raw_config(&state.config_path, &raw);
+    let _ = mihomo_config::save_raw_config(&state.config_path, &state.raw_config.read());
 
     Ok(Json(serde_json::json!({
         "message": "subscription refreshed",
@@ -740,25 +761,29 @@ async fn create_proxy_group(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateProxyGroupRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    if let Some(ref groups) = raw.proxy_groups {
-        if groups.iter().any(|g| g.name == body.name) {
-            return Err((StatusCode::CONFLICT, "group name already exists".into()));
+    let group_name = body.name.clone();
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        if let Some(ref groups) = raw.proxy_groups {
+            if groups.iter().any(|g| g.name == body.name) {
+                return Err((StatusCode::CONFLICT, "group name already exists".into()));
+            }
         }
-    }
-    let group = RawProxyGroup {
-        name: body.name.clone(),
-        group_type: body.group_type,
-        proxies: Some(body.proxies),
-        url: body.url,
-        interval: body.interval,
-        tolerance: body.tolerance,
-        ..Default::default()
+        let group = RawProxyGroup {
+            name: body.name,
+            group_type: body.group_type,
+            proxies: Some(body.proxies),
+            url: body.url,
+            interval: body.interval,
+            tolerance: body.tolerance,
+            ..Default::default()
+        };
+        raw.proxy_groups.get_or_insert_with(Vec::new).push(group);
+        raw.clone()
     };
-    raw.proxy_groups.get_or_insert_with(Vec::new).push(group);
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(Json(
-        serde_json::json!({"message": "group created", "name": body.name}),
+        serde_json::json!({"message": "group created", "name": group_name}),
     ))
 }
 
@@ -767,18 +792,21 @@ async fn update_proxy_group(
     Path(name): Path<String>,
     Json(body): Json<CreateProxyGroupRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    let group = raw
-        .proxy_groups
-        .as_mut()
-        .and_then(|groups| groups.iter_mut().find(|g| g.name == name))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "group not found".into()))?;
-    group.group_type = body.group_type;
-    group.proxies = Some(body.proxies);
-    group.url = body.url;
-    group.interval = body.interval;
-    group.tolerance = body.tolerance;
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        let group = raw
+            .proxy_groups
+            .as_mut()
+            .and_then(|groups| groups.iter_mut().find(|g| g.name == name))
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "group not found".into()))?;
+        group.group_type = body.group_type;
+        group.proxies = Some(body.proxies);
+        group.url = body.url;
+        group.interval = body.interval;
+        group.tolerance = body.tolerance;
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -786,23 +814,26 @@ async fn delete_proxy_group(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    if let Some(ref mut groups) = raw.proxy_groups {
-        let before = groups.len();
-        groups.retain(|g| g.name != name);
-        if groups.len() == before {
-            return Err((StatusCode::NOT_FOUND, "group not found".into()));
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        if let Some(ref mut groups) = raw.proxy_groups {
+            let before = groups.len();
+            groups.retain(|g| g.name != name);
+            if groups.len() == before {
+                return Err((StatusCode::NOT_FOUND, "group not found".into()));
+            }
+        } else {
+            return Err((StatusCode::NOT_FOUND, "no groups".into()));
         }
-    } else {
-        return Err((StatusCode::NOT_FOUND, "no groups".into()));
-    }
-    if let Some(ref mut rules) = raw.rules {
-        rules.retain(|r| {
-            let parts: Vec<&str> = r.split(',').collect();
-            parts.last().is_none_or(|target| target.trim() != name)
-        });
-    }
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+        if let Some(ref mut rules) = raw.rules {
+            rules.retain(|r| {
+                let parts: Vec<&str> = r.split(',').collect();
+                parts.last().is_none_or(|target| target.trim() != name)
+            });
+        }
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -844,9 +875,12 @@ async fn replace_rules(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReplaceRulesRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    raw.rules = Some(body.rules);
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        raw.rules = Some(body.rules);
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -860,13 +894,16 @@ async fn update_rule_at_index(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateRuleRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    let rules = raw.rules.get_or_insert_with(Vec::new);
-    if body.index >= rules.len() {
-        return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
-    }
-    rules[body.index] = body.rule;
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        let rules = raw.rules.get_or_insert_with(Vec::new);
+        if body.index >= rules.len() {
+            return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
+        }
+        rules[body.index] = body.rule;
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -874,13 +911,16 @@ async fn delete_rule(
     State(state): State<Arc<AppState>>,
     Path(index): Path<usize>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    let rules = raw.rules.get_or_insert_with(Vec::new);
-    if index >= rules.len() {
-        return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
-    }
-    rules.remove(index);
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        let rules = raw.rules.get_or_insert_with(Vec::new);
+        if index >= rules.len() {
+            return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
+        }
+        rules.remove(index);
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -894,14 +934,17 @@ async fn reorder_rules(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReorderRulesRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let mut raw = state.raw_config.write();
-    let rules = raw.rules.get_or_insert_with(Vec::new);
-    if body.from >= rules.len() || body.to >= rules.len() {
-        return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
-    }
-    let rule = rules.remove(body.from);
-    rules.insert(body.to, rule);
-    apply_raw_to_tunnel(&raw, &state.tunnel)?;
+    let snapshot = {
+        let mut raw = state.raw_config.write();
+        let rules = raw.rules.get_or_insert_with(Vec::new);
+        if body.from >= rules.len() || body.to >= rules.len() {
+            return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
+        }
+        let rule = rules.remove(body.from);
+        rules.insert(body.to, rule);
+        raw.clone()
+    };
+    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1138,7 +1181,7 @@ async fn put_configs(
         };
 
     // YAML syntax check — always 400 even with force=true (per spec)
-    let raw_config: RawConfig = match serde_yaml::from_str(&yaml) {
+    let mut raw_config: RawConfig = match serde_yaml::from_str(&yaml) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1148,6 +1191,11 @@ async fn put_configs(
                 .into_response()
         }
     };
+
+    // Pre-resolve any DNS-sourced ECH configs into inline base64.
+    if let Some(ps) = raw_config.proxies.as_mut() {
+        mihomo_config::ech_dns::preresolve_ech(ps).await;
+    }
 
     // Semantic rebuild (proxy/rule parsing)
     let resolver = state.tunnel.resolver().clone();
