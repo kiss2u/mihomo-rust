@@ -115,12 +115,13 @@ where
     let request = format!(
         "GET {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
-         User-Agent: mihomo\r\n\
+         User-Agent: clash.meta/{version}\r\n\
          Accept: */*\r\n\
          Connection: close\r\n\
          \r\n",
         path = parsed.path,
         host = host_header,
+        version = env!("CARGO_PKG_VERSION"),
     );
     stream
         .write_all(request.as_bytes())

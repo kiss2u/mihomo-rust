@@ -406,7 +406,7 @@ fn fetch_http_blocking(url: &str) -> Result<Vec<u8>> {
 pub(crate) async fn fetch_http_async(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("clash-verge/1.0")
+        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();

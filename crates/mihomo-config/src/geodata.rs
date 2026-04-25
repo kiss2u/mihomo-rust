@@ -99,7 +99,7 @@ pub async fn download_and_replace(url: &str, dest: &Path) -> Result<(), anyhow::
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
-        .user_agent("mihomo-rust/1.0")
+        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let resp = client.get(url).send().await?;

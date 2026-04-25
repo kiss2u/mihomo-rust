@@ -13,7 +13,7 @@ pub struct SubscriptionData {
 pub async fn fetch_subscription(url: &str) -> Result<SubscriptionData, anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("clash-verge/1.0")
+        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();
